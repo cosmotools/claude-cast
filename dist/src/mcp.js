@@ -12,6 +12,9 @@ import { outputDir, resolvePaths } from './paths.js';
 import { VERSION } from './version.js';
 import { RegistryError, addProfile, editProfile, ensureColor, findProfile, loadProfiles, removeProfile, requireReady, slotDescription, updateProfile, } from './registry.js';
 const HUMAN_ONLY = 'Call ONLY when the user explicitly asked for it (/cast:add, /cast:open): the window is for a human (to log in, add sites or work by hand). Never call it on your own because a session expired.';
+const MAX_MARKS = 8;
+const MAX_NOTE = 120;
+const SHAPES = new Set(['circle', 'box', 'underline', 'arrow']);
 const CAST_TOOLS = [
     {
         name: 'cast_list',
@@ -33,6 +36,41 @@ const CAST_TOOLS = [
         name: 'cast_close',
         description: 'Close the Chrome of a profile. Logins are kept in the profile. Close profiles when the task is done.',
         annotations: { title: 'Close a profile', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        inputSchema: { type: 'object', properties: { profile: PROFILE_PARAM }, required: ['profile'] },
+    },
+    {
+        name: 'cast_draw',
+        description: 'Show the person where to look: draw hand-drawn marks with short notes over elements of the profile\'s current tab and bring it to the front. '
+            + 'For pointing at things on the page while you explain them, not for testing. Replaces earlier marks. The person erases them by clicking the page, Esc '
+            + 'or the "Clear marks" button; cast also erases them before your next click, typing or navigation, and the next call tells you if the person erased them. '
+            + 'The page sees one empty element while marks are shown, nothing else.',
+        annotations: { title: 'Draw marks on the page', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        inputSchema: {
+            type: 'object',
+            properties: {
+                profile: PROFILE_PARAM,
+                marks: {
+                    type: 'array',
+                    minItems: 1,
+                    maxItems: MAX_MARKS,
+                    items: {
+                        type: 'object',
+                        properties: {
+                            target: { type: 'string', description: 'Element ref from the latest browser_snapshot of this profile (e.g. "e12", "f1e3" inside an iframe), or a unique CSS selector' },
+                            shape: { type: 'string', enum: ['circle', 'box', 'underline', 'arrow'], description: 'circle (default), box, underline, or only an arrow pointing at the element' },
+                            note: { type: 'string', maxLength: MAX_NOTE, description: 'A few handwritten words next to the mark, in the language you talk to the user in; placed where it covers little of the page, with an arrow when far' },
+                        },
+                        required: ['target'],
+                    },
+                },
+            },
+            required: ['profile', 'marks'],
+        },
+    },
+    {
+        name: 'cast_erase',
+        description: 'Erase the marks cast_draw drew in a profile.',
+        annotations: { title: 'Erase marks', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         inputSchema: { type: 'object', properties: { profile: PROFILE_PARAM }, required: ['profile'] },
     },
     {
@@ -142,6 +180,16 @@ async function castTool(paths, gateway, tool, args) {
             const name = str(args, 'profile');
             return ok(await gateway.close(name) ? `Closed "${name}".` : `"${name}" was not open.`);
         }
+        case 'cast_draw': {
+            const p = usable(paths, str(args, 'profile'));
+            const marks = drawMarks(args.marks);
+            const notice = await gateway.draw(gatewayProfile(paths, p), marks);
+            return ok([notice, `Drew ${marks.length} mark${marks.length > 1 ? 's' : ''} in "${p.name}". Tell the user to look at that window.`].filter(Boolean).join('\n'));
+        }
+        case 'cast_erase': {
+            const name = str(args, 'profile');
+            return ok(await gateway.erase(name) ? `Erased the marks in "${name}".` : `No marks are shown in "${name}".`);
+        }
         case 'cast_add': {
             const name = str(args, 'name');
             const scope = (optStr(args, 'scope') ?? 'local');
@@ -216,6 +264,22 @@ async function castTool(paths, gateway, tool, args) {
         default:
             return fail(`Unknown tool ${tool}.`);
     }
+}
+function drawMarks(raw) {
+    if (!Array.isArray(raw) || !raw.length)
+        throw new RegistryError('"marks" must be a non-empty array of {target, shape?, note?}.');
+    if (raw.length > MAX_MARKS)
+        throw new RegistryError(`At most ${MAX_MARKS} marks at a time: show the rest after the person has looked.`);
+    return raw.map((m) => {
+        const target = str(m ?? {}, 'target');
+        const shape = optStr(m, 'shape');
+        if (shape && !SHAPES.has(shape))
+            throw new RegistryError(`Unknown shape "${shape}": use circle, box, underline or arrow.`);
+        const note = optStr(m, 'note');
+        if (note && note.length > MAX_NOTE)
+            throw new RegistryError(`A note is at most ${MAX_NOTE} characters; write a few words.`);
+        return { target, ...(shape ? { shape: shape } : {}), ...(note ? { note } : {}) };
+    });
 }
 /** A browser_* or cast_open target: ready, and not in the middle of a login. */
 function usable(paths, name) {

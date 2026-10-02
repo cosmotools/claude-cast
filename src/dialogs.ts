@@ -1,26 +1,7 @@
-import { createRequire } from 'node:module';
-
-/** The `ws` client Playwright bundles (Node 20 has no WebSocket without a flag). */
-interface Socket {
-  on(event: 'message', listener: (data: Buffer) => void): void;
-  once(event: 'open' | 'error' | 'close', listener: (arg?: unknown) => void): void;
-  send(data: string): void;
-  close(): void;
-}
-const WebSocket = (createRequire(import.meta.url)('playwright-core/lib/utilsBundle') as { ws: new (url: string) => Socket }).ws;
-
-interface Message {
-  id?: number;
-  method?: string;
-  params?: Record<string, unknown>;
-  result?: Record<string, unknown>;
-  error?: { message: string };
-  sessionId?: string;
-}
+import { Cdp, type CdpEvent } from './cdp.js';
 
 /** How long a page may take to answer before it counts as blocked by a dialog. */
 const PROBE_MS = 1000;
-const STEP_MS = 5000;
 
 /**
  * Closes JavaScript dialogs in Chrome's tabs while Playwright MCP attaches. A restored tab whose page
@@ -32,9 +13,7 @@ const STEP_MS = 5000;
  * Best effort: any failure leaves the tabs as they are.
  */
 export class DialogGuard {
-  private socket?: Socket;
-  private nextId = 0;
-  private readonly pending = new Map<number, (m: Message) => void>();
+  private cdp?: Cdp;
   private readonly sessions = new Set<string>();
   /** Targets attached once; Target.setDiscoverTargets also reports the existing ones. */
   private readonly targets = new Set<string>();
@@ -50,15 +29,7 @@ export class DialogGuard {
   }
 
   private async connect(endpoint: string): Promise<void> {
-    const version = await (await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(STEP_MS) })).json() as { webSocketDebuggerUrl: string };
-    const socket = new WebSocket(version.webSocketDebuggerUrl);
-    this.socket = socket;
-    await new Promise<void>((resolve, reject) => {
-      socket.once('open', () => resolve());
-      socket.once('error', e => reject(e));
-    });
-    socket.once('close', () => { this.socket = undefined; });
-    socket.on('message', data => this.onMessage(JSON.parse(data.toString()) as Message));
+    this.cdp = await Cdp.connect(endpoint, e => this.onEvent(e));
     // Tabs that Chrome is still restoring are attached as they appear.
     await this.send('Target.setDiscoverTargets', { discover: true });
     const { targetInfos } = await this.send('Target.getTargets') as { targetInfos: { targetId: string; type: string }[] };
@@ -66,10 +37,7 @@ export class DialogGuard {
   }
 
   stop(): void {
-    this.socket?.close();
-    this.socket = undefined;
-    for (const resolve of this.pending.values()) resolve({ error: { message: 'stopped' } });
-    this.pending.clear();
+    this.cdp?.close();
   }
 
   private async watch(targetId: string): Promise<void> {
@@ -88,35 +56,16 @@ export class DialogGuard {
     return Promise.race([probe, new Promise<boolean>(r => setTimeout(() => r(false), PROBE_MS))]);
   }
 
-  private onMessage(m: Message): void {
-    if (m.id !== undefined) {
-      this.pending.get(m.id)?.(m);
-      this.pending.delete(m.id);
-      return;
-    }
-    if (m.method === 'Target.targetCreated') {
-      const info = m.params?.targetInfo as { targetId: string; type: string };
+  private onEvent(e: CdpEvent): void {
+    if (e.method === 'Target.targetCreated') {
+      const info = e.params.targetInfo as { targetId: string; type: string };
       if (info.type === 'page') this.watch(info.targetId).catch(() => {});
-    } else if (m.method === 'Page.javascriptDialogOpening' && m.sessionId && this.sessions.has(m.sessionId)) {
-      this.send('Page.handleJavaScriptDialog', { accept: m.params?.type === 'alert' }, m.sessionId).catch(() => {});
+    } else if (e.method === 'Page.javascriptDialogOpening' && e.sessionId && this.sessions.has(e.sessionId)) {
+      this.send('Page.handleJavaScriptDialog', { accept: e.params.type === 'alert' }, e.sessionId).catch(() => {});
     }
   }
 
   private send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
-    const socket = this.socket;
-    if (!socket) return Promise.reject(new Error('not connected'));
-    const id = ++this.nextId;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`${method} timed out`));
-      }, STEP_MS);
-      this.pending.set(id, m => {
-        clearTimeout(timer);
-        if (m.error) reject(new Error(m.error.message));
-        else resolve(m.result ?? {});
-      });
-      socket.send(JSON.stringify({ id, method, params, sessionId }));
-    });
+    return this.cdp ? this.cdp.send(method, params, sessionId) : Promise.reject(new Error('not connected'));
   }
 }

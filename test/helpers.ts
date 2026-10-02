@@ -72,6 +72,12 @@ export async function startSite(): Promise<TestSite> {
       res.end('<script>fetch("/report?webdriver=" + navigator.webdriver)</script>');
       return;
     }
+    if (url.pathname === '/marks') {
+      // A strict Content-Security-Policy: nothing may be loaded or inlined.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': "default-src 'none'" });
+      res.end('<title>Invoice</title><h1>Invoice</h1><p>Total: <b id="total">$0.00</b></p><button>Pay now</button>');
+      return;
+    }
     if (url.pathname === '/login') {
       const user = url.searchParams.get('user') ?? 'anon';
       const token = `tok${randomBytes(12).toString('hex')}`;

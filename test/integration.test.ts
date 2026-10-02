@@ -283,6 +283,31 @@ describe('gateway', () => {
   test('browser_close is not proxied', async () => {
     await assert.rejects(gateway.call(gp('Sam'), 'browser_close', {}), /cast_close/);
   });
+
+  test('marks are drawn out of the page\'s reach and erased by the person or before Claude\'s input', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks` });
+    const ref = /button "Pay now" \[ref=(\w+)\]/.exec(text(await gateway.call(sam, 'browser_snapshot', {})))?.[1];
+    assert.ok(ref);
+    await assert.rejects(gateway.draw(sam, [{ target: '#missing' }]), /not on the page/);
+    assert.equal(await gateway.draw(sam, [{ target: ref, note: 'Нажмите здесь' }, { target: '#total', shape: 'underline' }]), undefined);
+    // The page sees one empty element, not what is drawn in it; the snapshot does not show it either.
+    const seen = await gateway.call(sam, 'browser_evaluate', {
+      function: '() => { const e = document.documentElement.lastElementChild; return [e.tagName, e.shadowRoot, e.childNodes.length, e.textContent].join("|"); }',
+    });
+    assert.match(text(seen), /### Result\s+"DIV\|\|0\|"/);
+    assert.doesNotMatch(text(await gateway.call(sam, 'browser_snapshot', {})), /Clear marks/);
+    // The person clicks the page: the next call says so.
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.mouse.click(5, 5); }' });
+    assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks by clicking the page/);
+    assert.equal(await gateway.erase('Sam'), false);
+    // Claude's own click erases them first, and nothing is reported.
+    await gateway.draw(sam, [{ target: ref, shape: 'box' }]);
+    await gateway.call(sam, 'browser_click', { target: ref });
+    assert.doesNotMatch(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks|marks are gone/);
+    await gateway.draw(sam, [{ target: ref, shape: 'arrow' }]);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
 });
 
 describe('macOS', { skip: !(process.platform === 'darwin' && headed) && 'macOS with CAST_TEST_HEADED=1' }, () => {
@@ -319,7 +344,7 @@ describe('cast MCP server', () => {
   test('lists cast and proxied tools', async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name);
-    for (const n of ['cast_list', 'cast_open', 'cast_close', 'cast_add', 'cast_open_for_user', 'cast_user_window_result', 'cast_set_sites', 'cast_update', 'cast_remove', 'browser_click']) {
+    for (const n of ['cast_list', 'cast_open', 'cast_close', 'cast_add', 'cast_open_for_user', 'cast_user_window_result', 'cast_set_sites', 'cast_update', 'cast_remove', 'cast_draw', 'cast_erase', 'browser_click']) {
       assert.ok(names.includes(n), n);
     }
     // The Anthropic directory requires a title and read-only/destructive hints on every tool.

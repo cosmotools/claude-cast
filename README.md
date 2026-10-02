@@ -72,6 +72,7 @@ Names: latin letters, digits, `-`, `_`, up to 40 characters, starting with a let
 - **Each person's window has its own color** and their name as the window title (`Sam (sends messages) · cast`; on Linux in the title bar), so two windows side by side are easy to tell apart. cast sets the theme color each time it opens the window.
 - **Logins and tabs are kept** between sessions.
 - **Claude picks people by description.** It never guesses a role from a profile name. If no profile or several fit ("the vendor"), it asks you once and saves your answer. Change a description any time with `/cast:edit <name>`.
+- **Claude points at things on the page.** Ask *"show me where the total is wrong"* and Claude circles it and writes a short note in that person's window, like with a pen. Click anywhere, press Esc or "Clear marks" to erase.
 - **Claude never logs in.** When a session expires, it asks you to run `/cast:open <name>` and log in again there.
 - **cast reads the browser history of its own profiles, nothing else.** When you close a window from `/cast:add` or `/cast:open`, cast reads the visits made in it to save the sites (as hosts). Never your personal Chrome profile, never cookies or page content. Details: [PRIVACY.md](PRIVACY.md).
 - **Claude sees what the person sees, email included.** Prefer test accounts. cast never stores passwords or shows cookies. Details: [SECURITY.md](SECURITY.md).
@@ -153,4 +154,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and the [changelog](CHANGELOG.md).
 
 ## License
 
-MIT
+MIT. Notes are written with outlines of the [Caveat](https://github.com/googlefonts/caveat) font, [SIL Open Font License 1.1](assets/OFL.txt).

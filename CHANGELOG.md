@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.14.0 — 2026-10-04
+
+### Added
+- `cast_draw`: Claude shows you where to look. It circles, boxes or underlines elements in a person's window, or points at them with an arrow, and writes short notes next to them, like with a pen, then brings that tab to the front. Click the page, press Esc or "Clear marks" to erase them; Claude learns that you did. `cast_erase` erases them too. The marks follow the page as it scrolls, work inside iframes and over strict Content-Security-Policy pages, and pages see only one empty element while they are shown.
+
 ## 0.13.2 — 2026-10-03
 
 ### Fixed

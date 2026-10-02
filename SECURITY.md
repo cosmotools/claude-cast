@@ -9,6 +9,8 @@ cast keeps real, logged-in browser sessions on your machine and lets Claude use 
 - **Keeps profiles private to your user.** Chrome data folders are created with mode `0700`. `.claude/claude-cast.yaml` (committed team slots) holds only names and descriptions, never emails or credentials.
 - **Acts as the person, in the person's own session.** A human logs in; Claude then works in that session on the user's behalf. Like Playwright MCP by default, cast starts Claude's window with `--disable-blink-features=AutomationControlled` (and `--test-type`, which only hides Chrome's warning bar about that flag), so pages see `navigator.webdriver = false`. The user window needs neither: it has no DevTools port. It does nothing more: no fingerprint spoofing, no CAPTCHA solving, no automated logins. You are responsible for following the terms of the services you use through cast.
 
+- **Draws marks without touching page scripts.** `cast_draw` runs in an isolated world of the page: page scripts cannot read or call it. While marks are shown, the page sees one empty element; it disappears when they are erased.
+
 ## What cast does not protect against
 
 - **Claude sees what the profile sees.** Pages, including email and chat, are read by Claude and sent to the model as part of your Claude Code session. Prefer test accounts; add only accounts you are fine with Claude reading.
