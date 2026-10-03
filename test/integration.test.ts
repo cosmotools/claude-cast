@@ -301,6 +301,12 @@ describe('gateway', () => {
     await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.mouse.click(5, 5); }' });
     assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks by clicking the page/);
     assert.equal(await gateway.erase('Sam'), false);
+    // The person presses "Clear marks" in the bottom right corner.
+    await gateway.draw(sam, [{ target: '#total' }]);
+    await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: 'async (page) => { const [w, h] = await page.evaluate(() => [innerWidth, innerHeight]); await page.mouse.click(w - 40, h - 30); }',
+    });
+    assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks with the "Clear marks" button/);
     // Claude's own click erases them first, and nothing is reported.
     await gateway.draw(sam, [{ target: ref, shape: 'box' }]);
     await gateway.call(sam, 'browser_click', { target: ref });

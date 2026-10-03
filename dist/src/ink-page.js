@@ -85,8 +85,9 @@ export function inkPage() {
     // ---- dismissal -------------------------------------------------------------------------------
     // cast erases the marks itself before Claude clicks or types, so input here is the person's.
     addEventListener('pointerdown', e => {
+        // Events from the closed shadow root arrive retargeted to the host, and only the button takes pointer events.
         if (shown)
-            stop(button && e.composedPath().includes(button) ? 'button' : 'click');
+            stop(host && e.target === host ? 'button' : 'click');
     }, true);
     addEventListener('keydown', e => {
         // Esc also closes a page dialog; leave it to the page then.
