@@ -67,9 +67,25 @@ claude plugin validate --strict . # check the manifests
 - CI runs the tests on Ubuntu, macOS and Windows (Git Bash). Headless Chrome on Windows has no window to close, so tests that play the human closing it stop it by force.
 - On macOS, `CAST_TEST_HEADED=1` also runs a test that closes a window and checks that Chrome quits; headless Chrome has no windows.
 
+## Tests
+
+- A bug fix starts with a test that reproduces the bug: it fails without the fix and passes with it. Name the test after the behavior, not the issue number.
+- A feature comes with tests for what a user relies on: the main path, the edge cases and the errors it reports. Before calling it done, list every behavior it promises (README, `CHANGELOG.md`, tool descriptions) and point each at a test, or at the check by hand the pull request describes.
+- Check each behavior at the lowest level that shows it:
+  1. Unit tests: logic that can be called without Chrome (profile lists and scopes, finding the browsers installed, telling sign-in hosts from work sites, window titles written into a saved session).
+  2. Integration tests (`test/integration.test.ts`): real headless Chrome through the gateway or the MCP server, for anything that depends on Chrome, Playwright MCP or the file system (session restore, the tab Chrome restored in front, dialogs while Playwright attaches, closing without losing cookies). When a change draws on a page, check the pixels of a screenshot in the areas that matter, not whole images: rendering differs between systems.
+  3. A look at screenshots: when a change alters what the person sees, save screenshots of the affected pages and look at them (legibility, overlaps). The pull request says what was looked at.
+  4. A check by hand with a visible window, only for what headless Chrome and CI cannot do: a person closing or covering a window, a window coming to the front, a platform CI does not run headed, a real SSO login. The person logs in (`/cast:add`, `/cast:open`); Claude never does. List the steps and results in the pull request.
+- A check made by hand or with a one-off script becomes a test when headless Chrome can show it.
+- Make sure each new test can fail: break the code it checks for a moment (revert the fix, skip the step, change the condition) and see that this test fails. A test that passes either way checks nothing; for example, "no mark here" passes on a screenshot taken before an animation has drawn anything.
+- Tests must be deterministic on Ubuntu, macOS and Windows: wait for a condition, not a fixed delay, and clean up the Chrome processes and folders they create.
+- Do not delete or weaken an existing test to make a change pass; if the expected behavior changed, say so in the pull request.
+- Changes to skill text, hook text or tool descriptions are checked with real `claude -p` runs, comparing the behavior before and after.
+
 ## Rules
 
 - Everything in the repository is in English.
 - Pull requests go into `develop`. `main` holds only releases, merged from `develop`: the Claude directory and `/plugin marketplace add` install the head of `main`, and an Anthropic reviewer checks every commit the directory picks up (the plugin installs dependencies from a lockfile).
+- Every bug fix and every feature comes with tests in the same pull request (see "Tests" above).
 - `dist/src` is committed so the plugin needs no build step after install: run `npm run build` and commit `dist/` with source changes.
 - Releases: bump the version in `package.json` and `.claude-plugin/plugin.json`, run `npm install` (updates `package-lock.json`), add a `CHANGELOG.md` entry. Users get updates only when the version changes. CI checks that the versions match; after the merge to `main` a workflow tags the version and publishes a GitHub release with its `CHANGELOG.md` section.
