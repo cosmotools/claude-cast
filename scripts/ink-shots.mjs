@@ -24,7 +24,7 @@ const shot = async name => {
   writeFileSync(join(out, `${name}.png`), Buffer.from(JSON.parse(/### Result\n(.+)/.exec(r)[1]), 'base64'));
   console.log(join(out, `${name}.png`));
 };
-const scene = () => gateway.call(profile, 'browser_navigate', { url: `${site.url}/marks-scene` });
+const scene = (query = '') => gateway.call(profile, 'browser_navigate', { url: `${site.url}/marks-scene${query}` });
 
 try {
   await scene();
@@ -49,6 +49,13 @@ try {
   await scene();
   await gateway.draw(profile, [{ target: '#far', shape: 'box', note: 'Scrolled into view' }]);
   await shot('5-below-the-fold');
+
+  await scene('?dark');
+  await gateway.draw(profile, [
+    { target: '#total', note: 'On a dark page' },
+    { target: '#gone', shape: 'underline', note: 'Подчёркнуто' },
+  ]);
+  await shot('6-dark-page');
 } finally {
   await gateway.closeAll();
   await site.close();

@@ -430,6 +430,41 @@ describe('gateway', () => {
     assert.equal(await gateway.erase('Sam'), true);
   });
 
+  test('marks stay sharp on a high-density screen, also after the window moves to one', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    await gateway.draw(sam, [{ target: '#gone', shape: 'box' }]);
+    const box = await rect(gateway, sam, 'document.getElementById("gone").getBoundingClientRect()');
+    // Two device pixels per CSS pixel (Retina, or Windows at 200%), set after the marks are drawn. Playwright
+    // takes screenshots at its own scale, so this one comes from Chrome directly.
+    const r = text(await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: `async (page) => {
+        const s = await page.context().newCDPSession(page);
+        await s.send("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor: 2, mobile: false });
+        await new Promise(r => setTimeout(r, 2000));
+        const { data } = await s.send("Page.captureScreenshot", { format: "png" });
+        await s.send("Emulation.clearDeviceMetricsOverride");
+        return data;
+      }`,
+    }));
+    const img = PNG.sync.read(Buffer.from(JSON.parse(/### Result\n(.+)/.exec(r)![1]) as string, 'base64'));
+    assert.equal(img.width, 1600);
+    const area = { x: box.x * 2, y: box.y * 2, width: box.width * 2, height: box.height * 2 };
+    // Drawn at the screen's density, most of a stroke is the full red; a canvas stretched from CSS pixels
+    // smears it, and only about half is.
+    const all = red(img, area, 40);
+    let full = 0;
+    for (let y = Math.max(0, Math.floor(area.y - 40)); y < area.y + area.height + 40; y++) {
+      for (let x = Math.max(0, Math.floor(area.x - 40)); x < area.x + area.width + 40; x++) {
+        const i = (y * img.width + x) * 4;
+        if (img.data[i] > 215 && img.data[i + 1] < 70 && img.data[i + 2] < 70) full++;
+      }
+    }
+    assert.ok(all > 1000, `marks drawn: ${all}`);
+    assert.ok(full / all > 0.7, `sharp: ${full} of ${all} red pixels are full red`);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
   test('Claude learns that the marks are gone when the page changes under them', async () => {
     const sam = gp('Sam');
     await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });

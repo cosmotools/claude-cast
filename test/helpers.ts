@@ -80,10 +80,11 @@ export async function startSite(): Promise<TestSite> {
     }
     if (url.pathname === '/marks-scene') {
       // Fixed places for checking marks by pixels: text beside the total, an element to remove, an iframe,
-      // an element below the fold and a dialog with a dark backdrop that would dim marks under it.
+      // an element below the fold and a dialog with a dark backdrop that would dim marks under it. ?dark: a dark page.
+      const dark = url.searchParams.has('dark') ? ' background: #1e1f22; color: #dfe1e5;' : '';
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<title>Scene</title>
-<style>body { margin: 0; font: 16px sans-serif; height: 3000px } #scene > * { position: absolute; margin: 0 } dialog::backdrop { background: rgba(0, 0, 0, 0.85) }</style>
+<style>body { margin: 0; font: 16px sans-serif; height: 3000px;${dark} } #scene > * { position: absolute; margin: 0 } dialog::backdrop { background: rgba(0, 0, 0, 0.85) }</style>
 <div id="scene">
 <b id="total" style="left: 40px; top: 40px">$0.00</b>
 <p id="text" style="left: 140px; top: 30px; width: 400px">${'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(4)}</p>
