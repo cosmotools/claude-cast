@@ -20,20 +20,24 @@ export function inkPage() {
     let erasedBy;
     let frame = 0;
     let lastKey = '';
+    /** The page's modal dialog (or fullscreen element), looked up when one may have opened, not every frame. */
+    let modal = null;
     const paths = new Map();
     const set = (el, styles) => {
         // CSSOM properties, not a <style> element or attribute: nothing for the page's CSP to block.
         for (const [k, v] of Object.entries(styles))
             el.style.setProperty(k, v, 'important');
     };
-    const modalOpen = () => {
+    const findModal = () => {
         try {
-            return !!document.querySelector(':modal');
+            return document.querySelector(':modal');
         }
         catch {
-            return false;
+            return null;
         }
     };
+    /** Checked every frame: a dialog removed while open changes no attribute. */
+    const modalOpen = () => !!modal?.isConnected && modal.matches(':modal');
     // ---- the layer -------------------------------------------------------------------------------
     const build = () => {
         host = document.createElement('div');
@@ -73,34 +77,53 @@ export function inkPage() {
     };
     // A page dialog or popover opened later goes above us in the top layer: come back on top.
     const raise = () => {
+        modal = findModal();
         if (shown)
             attach();
     };
-    new MutationObserver(raise).observe(document, { subtree: true, attributes: true, attributeFilter: ['open'] });
-    document.addEventListener('toggle', e => {
-        if (e.target !== host && e.newState === 'open')
-            raise();
-    }, true);
-    document.addEventListener('fullscreenchange', raise, true);
+    const observer = new MutationObserver(raise);
     // ---- dismissal -------------------------------------------------------------------------------
     // cast erases the marks itself before Claude clicks or types, so input here is the person's.
-    addEventListener('pointerdown', e => {
+    const onPointer = (e) => {
         // Events from the closed shadow root arrive retargeted to the host, and only the button takes pointer events.
         if (shown)
             stop(host && e.target === host ? 'button' : 'click');
-    }, true);
-    addEventListener('keydown', e => {
+    };
+    const onKey = (e) => {
         // Esc also closes a page dialog; leave it to the page then.
-        if (shown && e.key === 'Escape' && !modalOpen())
+        if (shown && e.key === 'Escape' && !findModal())
             stop('escape');
-    }, true);
+    };
+    const onToggle = (e) => {
+        if (e.target !== host && e.newState === 'open')
+            raise();
+    };
+    const listeners = [
+        [window, 'pointerdown', onPointer], [window, 'keydown', onKey], [document, 'toggle', onToggle], [document, 'fullscreenchange', raise],
+    ];
+    /** Listeners and the observer are on the page only while marks are shown. */
+    const listen = (on) => {
+        for (const [target, type, f] of listeners) {
+            if (on)
+                target.addEventListener(type, f, true);
+            else
+                target.removeEventListener(type, f, true);
+        }
+        if (on)
+            observer.observe(document, { subtree: true, attributes: true, attributeFilter: ['open'] });
+        else
+            observer.disconnect();
+    };
     const stop = (by) => {
+        if (shown)
+            listen(false);
         shown = false;
         erasedBy = by;
         cancelAnimationFrame(frame);
         host?.remove();
         host = canvas = button = undefined;
         drawn = [];
+        modal = null;
     };
     // ---- geometry --------------------------------------------------------------------------------
     const random = (seed) => () => {
@@ -110,15 +133,18 @@ export function inkPage() {
     const overlap = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x))
         * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
     const grow = (b, dx, dy = dx) => ({ x: b.x - dx, y: b.y - dy, width: b.width + 2 * dx, height: b.height + 2 * dy });
-    /** What a shape covers around the element box. */
-    const outline = (b, shape) => {
-        if (shape === 'circle')
-            return grow(b, b.width * 0.25 + 10, b.height * 0.3 + 10);
-        if (shape === 'box')
-            return grow(b, 8);
-        if (shape === 'underline')
-            return { x: b.x - 4, y: b.y, width: b.width + 10, height: b.height + 10 };
-        return grow(b, 4);
+    /** What a mark covers: its element and the points of its strokes, grown by half a stroke with its halo. */
+    const area = (d, b) => {
+        let x0 = b.x, y0 = b.y, x1 = b.x + b.width, y1 = b.y + b.height;
+        for (const [pts] of shapeStrokes(d, b)) {
+            for (const [x, y] of pts) {
+                x0 = Math.min(x0, x);
+                y0 = Math.min(y0, y);
+                x1 = Math.max(x1, x);
+                y1 = Math.max(y1, y);
+            }
+        }
+        return grow({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 }, 4);
     };
     /**
      * The element under the box, so the mark follows it when the page or a container scrolls. An element
@@ -200,32 +226,11 @@ export function inkPage() {
         }
         return { lines, width, height: lines.length * size * 1.1, size, ox: 0, oy: 0, tilt: 0 };
     };
+    /** The outlines are SVG path data. */
     const glyphPath = (ch) => {
         let p = paths.get(ch);
-        if (p)
-            return p;
-        p = new Path2D();
-        const g = font.glyphs[ch];
-        let px = 0, py = 0;
-        for (const [, op, args] of g[1].matchAll(/([mlqcz])([^mlqcz]*)/g)) {
-            if (op === 'z') {
-                p.closePath();
-                continue;
-            }
-            const n = (args.match(/-?\d+/g) ?? []).map(Number);
-            const at = (i) => [px + n[i], py + n[i + 1]];
-            if (op === 'm')
-                p.moveTo(...at(0));
-            if (op === 'l')
-                p.lineTo(...at(0));
-            if (op === 'q')
-                p.quadraticCurveTo(...at(0), ...at(2));
-            if (op === 'c')
-                p.bezierCurveTo(...at(0), ...at(2), ...at(4));
-            px += n[n.length - 2];
-            py += n[n.length - 1];
-        }
-        paths.set(ch, p);
+        if (!p)
+            paths.set(ch, p = new Path2D(font.glyphs[ch][1]));
         return p;
     };
     const drawLabel = (ctx, l, x, y, alpha) => {
@@ -325,7 +330,7 @@ export function inkPage() {
     const place = (items) => {
         dimmed = undefined;
         const view = { x: 4, y: 4, width: innerWidth - 8, height: innerHeight - 8 };
-        const taken = items.map(d => outline(d.mark.box, d.mark.shape));
+        const taken = items.map(d => area(d, d.mark.box));
         const own = button?.getBoundingClientRect();
         if (own?.width)
             taken.push(grow(own, 8));
@@ -334,7 +339,7 @@ export function inkPage() {
             if (!l)
                 continue;
             const b = d.mark.box;
-            const o = outline(b, d.mark.shape);
+            const o = area(d, b);
             const w = l.width, h = l.height;
             const spots = [];
             // An arrow needs room to be seen.
@@ -438,7 +443,7 @@ export function inkPage() {
     };
     /** A curved arrow from the note to the nearest point of the mark. */
     const arrowStrokes = (d, b, l) => {
-        const o = d.mark.shape === 'arrow' ? grow(b, 4) : outline(b, d.mark.shape);
+        const o = area(d, b);
         const lc = [l.x + l.width / 2, l.y + l.height / 2];
         const tx = Math.min(Math.max(lc[0], o.x), o.x + o.width), ty = Math.min(Math.max(lc[1], o.y), o.y + o.height);
         // Leave from the note's edge facing the target.
@@ -531,8 +536,10 @@ export function inkPage() {
                 label.tilt = (rnd[5] - 0.6) * 0.06;
             return { mark, anchor: anchorFor(mark.box), label, rnd, arrow: false, bend: (rnd[9] - 0.5) * 0.5, start: now + i * 220 };
         });
+        modal = findModal();
         place(drawn);
         shown = true;
+        listen(true);
         erasedBy = undefined;
         lastKey = '';
         frame = requestAnimationFrame(render);
