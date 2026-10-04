@@ -78,6 +78,22 @@ export async function startSite(): Promise<TestSite> {
       res.end('<title>Invoice</title><h1>Invoice</h1><p>Total: <b id="total">$0.00</b></p><button>Pay now</button>');
       return;
     }
+    if (url.pathname === '/marks-scene') {
+      // Fixed places for checking marks by pixels: text beside the total, an element to remove, an iframe,
+      // an element below the fold and a dialog with a dark backdrop that would dim marks under it.
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<title>Scene</title>
+<style>body { margin: 0; font: 16px sans-serif; height: 3000px } #scene > * { position: absolute; margin: 0 } dialog::backdrop { background: rgba(0, 0, 0, 0.85) }</style>
+<div id="scene">
+<b id="total" style="left: 40px; top: 40px">$0.00</b>
+<p id="text" style="left: 140px; top: 30px; width: 400px">${'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '.repeat(4)}</p>
+<p id="gone" style="left: 40px; top: 200px">Removed soon</p>
+<iframe srcdoc="<body style='margin:0'><button style='margin:20px'>Approve</button>" style="left: 40px; top: 260px; width: 300px; height: 80px; border: 0"></iframe>
+<p id="far" style="left: 40px; top: 2000px">Far below</p>
+</div>
+<dialog id="dialog"><p>Page dialog</p></dialog>`);
+      return;
+    }
     if (url.pathname === '/login') {
       const user = url.searchParams.get('user') ?? 'anon';
       const token = `tok${randomBytes(12).toString('hex')}`;

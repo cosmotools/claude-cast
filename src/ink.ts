@@ -55,7 +55,7 @@ export class Ink {
     try {
       await this.evaluate(`(${inkPage.toString()})(), window.__castInk.show(${JSON.stringify(marks)}, ${JSON.stringify(fontFor(marks))}, ${JSON.stringify(options)})`);
     } catch (e) {
-      // E.g. a browser page (chrome://…), where no script runs.
+      // E.g. the tab was closed, or a JavaScript dialog keeps the page from running scripts.
       await this.release();
       throw new Error(`Cannot draw on this page: ${(e as Error).message.split('\n')[0]}`);
     }

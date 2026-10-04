@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -p .",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
-    "demo": "node docs/demo/render.mjs"
+    "demo": "node docs/demo/render.mjs",
+    "shots": "npm run build && node scripts/ink-shots.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.31.0",

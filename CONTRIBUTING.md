@@ -61,6 +61,7 @@ git clone https://github.com/cosmotools/claude-cast && cd claude-cast
 npm install
 npm test                          # build + unit + integration tests (real Chrome, headless)
 CAST_TEST_HEADED=1 npm test       # the same with visible windows
+npm run shots [dir]               # screenshots of cast_draw's marks to look at
 claude --plugin-dir .             # run Claude Code with your working copy
 claude plugin validate --strict . # check the manifests
 ```
@@ -69,6 +70,7 @@ claude plugin validate --strict . # check the manifests
 - `CAST_CONFIG_DIR`, `CAST_DATA_DIR` and `CAST_PROJECT_DIR` redirect all cast files. With `--plugin-dir` the profiles are in `plugins/data/cast-inline/`, apart from an installed cast's.
 - CI runs the tests on Ubuntu, macOS and Windows (Git Bash). Headless Chrome on Windows has no window to close, so tests that play the human closing it stop it by force.
 - On macOS, `CAST_TEST_HEADED=1` also runs a test that closes a window and checks that Chrome quits; headless Chrome has no windows.
+- Tests check marks by the pixels of screenshots in the areas that matter. `npm run shots` saves screenshots of the same test page with marks of every shape, a long note, a dialog and a far element (to a temporary folder by default): look at them after changing how marks are drawn or placed.
 
 ## Rules
 

@@ -311,16 +311,45 @@ export function inkPage(): void {
     ctx.restore();
   };
 
+  const CONTROLS = 'a, button, input, select, textarea, label, img, svg, video, canvas, iframe, [role], [contenteditable]';
+  const inside = (x: number, y: number, r: DOMRect) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+
+  /**
+   * Boxes of the text and controls in view, for points on a modal dialog's backdrop: hit testing does not
+   * reach the page under it (the page is inert), but the person still sees it there, dimmed.
+   */
+  let dimmed: DOMRect[] | undefined;
+  const dimmedBoxes = () => {
+    if (dimmed) return dimmed;
+    dimmed = [];
+    const seen = (r: DOMRect) => r.width && r.height && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+    for (const el of document.querySelectorAll(CONTROLS)) {
+      const r = el.getBoundingClientRect();
+      if (seen(r)) dimmed.push(r);
+    }
+    const walker = document.createTreeWalker(document.body ?? document.documentElement, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent?.trim()) continue;
+      range.selectNodeContents(node);
+      for (const r of range.getClientRects()) if (seen(r)) dimmed.push(r);
+    }
+    return dimmed;
+  };
+
   /** Is there text or a control at this point of the page? Notes avoid covering them. */
   const busy = (x: number, y: number) => {
     const el = document.elementFromPoint(x, y);
     if (!el || el === host || el === document.documentElement || el === document.body) return false;
-    if (el.matches('a, button, input, select, textarea, label, img, svg, video, canvas, iframe, [role], [contenteditable]')) return true;
+    if (el instanceof HTMLDialogElement && el.matches(':modal') && !inside(x, y, el.getBoundingClientRect())) {
+      return dimmedBoxes().some(r => inside(x, y, r));
+    }
+    if (el.matches(CONTROLS)) return true;
     for (const node of el.childNodes) {
       if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) continue;
       const range = document.createRange();
       range.selectNodeContents(node);
-      for (const r of range.getClientRects()) if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+      for (const r of range.getClientRects()) if (inside(x, y, r)) return true;
     }
     return false;
   };
@@ -330,6 +359,7 @@ export function inkPage(): void {
    * and covering as little of the page's text and controls as it can. A far place gets an arrow.
    */
   const place = (items: Drawn[]) => {
+    dimmed = undefined;
     const view: Box = { x: 4, y: 4, width: innerWidth - 8, height: innerHeight - 8 };
     const taken: Box[] = items.map(d => outline(d.mark.box, d.mark.shape));
     const own = button?.getBoundingClientRect();
@@ -358,16 +388,19 @@ export function inkPage(): void {
         let score = s[2] * 3 + (area - overlap(r, view)) * 60;
         for (const t of taken) score += overlap(r, t) * 25;
         if (score >= bestScore) continue;
+        // Points over the note and a margin around it, edges included: the tilt, the halo and glyphs wider
+        // than their advance reach past the box, and a note touching a line of text is hard to read.
         let hits = 0;
-        for (let i = 0; i < 4; i++) for (let j = 0; j < 3; j++) if (busy(r.x + (w * (i + 0.5)) / 4, r.y + (h * (j + 0.5)) / 3)) hits++;
-        score += (hits / 12) * area * 6;
+        for (let i = 0; i <= 6; i++) for (let j = 0; j <= 2; j++) if (busy(r.x - 8 + ((w + 16) * i) / 6, r.y - 8 + ((h + 16) * j) / 2)) hits++;
+        score += (hits / 21) * area * 6;
         if (s[2] > 10) {
-          // The arrow should not cross text either.
+          // The arrow should not cross text, other marks or their notes either.
           const ax = r.x + w / 2, ay = r.y + h / 2, bx = b.x + b.width / 2, by = b.y + b.height / 2;
+          const on = (x: number, y: number, t: Box) => x >= t.x && x <= t.x + t.width && y >= t.y && y <= t.y + t.height;
           let crossed = 0;
           for (let i = 1; i < 8; i++) {
             const x = ax + ((bx - ax) * i) / 8, y = ay + ((by - ay) * i) / 8;
-            if (!(x >= o.x && x <= o.x + o.width && y >= o.y && y <= o.y + o.height) && busy(x, y)) crossed++;
+            if (!on(x, y, o) && (busy(x, y) || taken.some(t => on(x, y, t)))) crossed++;
           }
           score += crossed * 1500;
         }
