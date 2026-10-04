@@ -320,7 +320,7 @@ export function inkPage(): void {
   };
 
   const CONTROLS = 'a, button, input, select, textarea, label, img, svg, video, canvas, iframe, [role], [contenteditable]';
-  const inside = (x: number, y: number, r: DOMRect) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  const inside = (x: number, y: number, r: Box) => x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
 
   /**
    * Boxes of the text and controls in view, for points on a modal dialog's backdrop: hit testing does not
@@ -389,6 +389,14 @@ export function inkPage(): void {
           [o.x - gap * 0.7 - w, o.y - gap * 0.7 - h, gap], [o.x - gap * 0.7 - w, o.y + o.height + gap * 0.7, gap],
         );
       }
+      // A spot's cost, lowest wins. The weights were tuned by eye on the scenes of `npm run shots`:
+      // - 60 per px² outside the window: a note cut off is unreadable, so this outweighs the rest;
+      // - 1500 per point where the arrow crosses text or another mark (7 points along it): a crossed arrow
+      //   is hard to follow;
+      // - 25 per px² over another mark, its note or the button: notes must not cover each other;
+      // - up to 6 per px² over the page's text and controls (the share of sampled points that hit some):
+      //   covering the page is allowed when there is no free room;
+      // - 3 per px of distance: nearer is better when all else is equal.
       let best = spots[0], bestScore = Infinity;
       for (const s of spots) {
         const r: Box = { x: s[0], y: s[1], width: w, height: h };
@@ -404,11 +412,10 @@ export function inkPage(): void {
         if (s[2] > 10) {
           // The arrow should not cross text, other marks or their notes either.
           const ax = r.x + w / 2, ay = r.y + h / 2, bx = b.x + b.width / 2, by = b.y + b.height / 2;
-          const on = (x: number, y: number, t: Box) => x >= t.x && x <= t.x + t.width && y >= t.y && y <= t.y + t.height;
           let crossed = 0;
           for (let i = 1; i < 8; i++) {
             const x = ax + ((bx - ax) * i) / 8, y = ay + ((by - ay) * i) / 8;
-            if (!on(x, y, o) && (busy(x, y) || taken.some(t => on(x, y, t)))) crossed++;
+            if (!inside(x, y, o) && (busy(x, y) || taken.some(t => inside(x, y, t)))) crossed++;
           }
           score += crossed * 1500;
         }

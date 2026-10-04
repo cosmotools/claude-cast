@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { Page } from 'playwright-core';
 import type { Browser } from './browsers.js';
 import { type Chrome, type WindowLook, launchChrome } from './chrome.js';
 import { DialogGuard } from './dialogs.js';
@@ -176,7 +177,7 @@ export class Gateway {
     const notice = await child.ink.before('cast_draw').catch(() => undefined);
     const located = await child.client.callTool({
       name: 'browser_run_code_unsafe',
-      arguments: { code: LOCATE.replace('TARGETS', JSON.stringify(marks.map(m => m.target))) },
+      arguments: { code: `async (page) => (${locateTargets.toString()})(page, ${JSON.stringify(marks.map(m => m.target))})` },
     }) as CallToolResult;
     const text = resultText(located);
     const json = /### Result\n(.+)/.exec(text)?.[1];
@@ -202,10 +203,10 @@ export interface DrawMark {
 /**
  * Runs in Playwright MCP: boxes of the targets in main-frame viewport coordinates, and the tab's DevTools
  * target id so cast can draw into it. Refs ("e12", "f1e3") resolve as in browser_click; anything else is a selector.
+ * Sent as `locateTargets.toString()`, so it must not use anything from outside the function.
  */
-const LOCATE = `async (page) => {
-  const targets = TARGETS;
-  const locate = t => page.locator(/^(f\\d+)?e\\d+$/.test(t) ? 'aria-ref=' + t : t);
+async function locateTargets(page: Page, targets: string[]): Promise<{ targetId: string; boxes: InkMark['box'][] }> {
+  const locate = (t: string) => page.locator(/^(f\d+)?e\d+$/.test(t) ? 'aria-ref=' + t : t);
   for (const t of targets) {
     const n = await locate(t).count().catch(() => 0);
     if (n !== 1) throw new Error(n ? '"' + t + '" matches ' + n + ' elements; use a ref from browser_snapshot.' : '"' + t + '" is not on the page; take a new browser_snapshot and use its refs.');
@@ -217,7 +218,7 @@ const LOCATE = `async (page) => {
   if (!box || box.y < 0 || box.x < 0 || box.y + box.height > height || box.x + box.width > width) {
     await first.evaluate(e => e.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => first.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {}));
   }
-  const boxes = [];
+  const boxes: InkMark['box'][] = [];
   for (const t of targets) {
     const box = await locate(t).boundingBox({ timeout: 3000 });
     if (!box) throw new Error('"' + t + '" is not visible.');
@@ -238,7 +239,7 @@ const LOCATE = `async (page) => {
   const { targetInfo } = await cdp.send('Target.getTargetInfo');
   await cdp.detach();
   return { targetId: targetInfo.targetId, boxes };
-}`;
+}
 
 /** Index of the one visible page, the tab in front of the window, or -1. Pages come in the order of browser_tabs. */
 const VISIBLE_TAB = 'async (page) => { const states = await Promise.all(page.context().pages()'
