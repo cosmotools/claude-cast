@@ -541,6 +541,65 @@ describe('gateway', () => {
     assert.equal(await gateway.erase('Sam'), true);
   });
 
+  test('a right-to-left note reads right to left', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    const wide = await rect(gateway, sam, 'document.getElementById("wide").getBoundingClientRect()');
+    // A one-letter word, then a long one: right to left, the long word is on the left.
+    await gateway.draw(sam, [{ target: '#wide', note: 'א בבבבבבבבבב' }]);
+    const img = await still(gateway, sam);
+    const band = { y: wide.y - 10, height: wide.height + 20 };
+    const has = (x: number) => red(img, { x, y: band.y, width: 1, height: band.height }) > 0;
+    // Past the circle's right side, the note: its widest gap is the space between the words. The
+    // "Clear marks" button is further right in the same rows.
+    const stop = img.width - 180;
+    let x = Math.round(wide.x + wide.width / 2);
+    while (x < stop && !has(x)) x++;
+    while (x < stop && has(x)) x++;
+    while (x < stop && !has(x)) x++;
+    const start = x;
+    let end = x, gap = { at: 0, width: 0 };
+    for (let run = 0; x < stop; x++) {
+      if (has(x)) {
+        if (run > gap.width) gap = { at: x - run, width: run };
+        run = 0;
+        end = x;
+      } else run++;
+    }
+    assert.ok(gap.width > 0 && end > start, 'the note is beside the circle');
+    const left = gap.at - start, right = end - (gap.at + gap.width);
+    assert.ok(left > right * 3, `the long word is on the left: ${left}px, then ${right}px`);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('a note is written in one font when the handwriting does not cover it, and wraps', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    // Text drawn in the system font, recorded in cast's world; handwritten glyphs are paths, not text.
+    await inInk(gateway, sam, `(() => {
+      window.texts = new Set();
+      const fill = CanvasRenderingContext2D.prototype.fillText;
+      CanvasRenderingContext2D.prototype.fillText = function (t, ...a) { texts.add(this.direction + ' ' + t); return fill.call(this, t, ...a); };
+      return true;
+    })()`);
+    const drawn = async (note: string) => {
+      await inInk(gateway, sam, 'texts.clear(), true');
+      await gateway.draw(sam, [{ target: '#total', note }]);
+      await still(gateway, sam);
+      return [...await inInk(gateway, sam, '[...texts]') as string[]].sort();
+    };
+    assert.deepEqual(await drawn('Should be $42'), [], 'all handwritten');
+    assert.deepEqual(await drawn('Итог ≠ 42, Ґ'), ['ltr ≠'], 'a missing symbol alone falls back');
+    assert.deepEqual(await drawn('Tổng tiền sai'), ['ltr Tổng tiền sai'], 'words mixing both: all in one font');
+    assert.deepEqual(await drawn('合计应为 42'), ['ltr 合计应为 42'], 'mostly missing: all in one font');
+    assert.deepEqual(await drawn('שלום עולם'), ['rtl שלום עולם'], 'right to left, ordered by the browser');
+    assert.deepEqual(await drawn('סך 42 USD'), ['rtl סך 42 USD'], 'right to left, even when most of it is handwritten');
+    // Chinese has no spaces: a long note still wraps.
+    const lines = await drawn('这是一个很长的中文注释用来检查换行是否正常工作而不是一行写到底');
+    assert.ok(lines.length > 1, lines.join(' | '));
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
   test('Claude learns that the marks are gone when the page changes under them', async () => {
     const sam = gp('Sam');
     await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });

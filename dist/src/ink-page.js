@@ -193,16 +193,34 @@ export function inkPage() {
         ctx.font = `${size * 0.8}px cursive`;
         return ctx.measureText(ch).width;
     };
-    /** Word-wrapped lines of runs; characters missing from the outlines fall back to a system font. */
+    /** Hebrew, Arabic, Syriac, Thaana, N'Ko and their presentation forms. */
+    const RTL = /[\u0590-\u07ff\u0860-\u08ff\ufb1d-\ufdff\ufe70-\ufeff]/;
+    /**
+     * Word-wrapped lines of runs; characters missing from the outlines fall back to a system font. A note
+     * the outlines do not cover well (right to left, most characters missing, or a word mixing both) is
+     * drawn whole in the system font: the browser orders, joins and shapes it, and one note has one font.
+     */
     const layout = (text, ctx) => {
         const size = NOTE_SIZE;
+        const missing = (ch) => !font.glyphs[ch];
+        const chars = [...text].filter(ch => ch.trim());
+        const rtl = RTL.test(text);
+        const whole = rtl || chars.filter(missing).length * 2 > chars.length
+            || text.split(/\s+/).some(w => [...w].some(missing) && [...w].some(ch => !missing(ch)));
+        const measure = (word) => {
+            if (!whole)
+                return [...word].reduce((s, ch) => s + advance(ch, size, ctx), 0);
+            ctx.font = `${size * 0.8}px cursive`;
+            return ctx.measureText(word).width;
+        };
         const lines = [];
         let width = 0;
         for (const para of text.split('\n')) {
             let line = [], x = 0;
-            const words = para.split(/(\s+)/);
+            // A word wider than a note breaks between characters: Chinese and Japanese have no spaces.
+            const words = para.split(/(\s+)/).flatMap(w => measure(w) > NOTE_WIDTH ? [...w] : [w]);
             for (const word of words) {
-                const w = [...word].reduce((s, ch) => s + advance(ch, size, ctx), 0);
+                const w = measure(word);
                 if (x + w > NOTE_WIDTH && x > 0 && word.trim()) {
                     lines.push(line);
                     width = Math.max(width, x);
@@ -211,6 +229,14 @@ export function inkPage() {
                 }
                 if (!line.length && !word.trim())
                     continue;
+                if (whole) {
+                    if (line.length)
+                        line[0].text += word;
+                    else
+                        line.push({ text: word, glyph: false, x: 0 });
+                    x += w;
+                    continue;
+                }
                 for (const ch of word) {
                     const glyph = !!font.glyphs[ch];
                     const last = line[line.length - 1];
@@ -224,7 +250,7 @@ export function inkPage() {
             lines.push(line);
             width = Math.max(width, x);
         }
-        return { lines, width, height: lines.length * size * 1.1, size, ox: 0, oy: 0, tilt: 0 };
+        return { lines, width, height: lines.length * size * 1.1, size, ox: 0, oy: 0, tilt: 0, rtl };
     };
     /** The outlines are SVG path data. */
     const glyphPath = (ch) => {
@@ -262,12 +288,16 @@ export function inkPage() {
                 }
                 else {
                     ctx.font = `${l.size * 0.8}px cursive`;
+                    // A right-to-left line is drawn from the note's right edge.
+                    ctx.direction = l.rtl ? 'rtl' : 'ltr';
+                    ctx.textAlign = l.rtl ? 'right' : 'left';
+                    const x = l.rtl ? l.width - run.x : run.x;
                     ctx.lineJoin = 'round';
                     ctx.strokeStyle = HALO;
                     ctx.lineWidth = 4;
-                    ctx.strokeText(run.text, run.x, base);
+                    ctx.strokeText(run.text, x, base);
                     ctx.fillStyle = color;
-                    ctx.fillText(run.text, run.x, base);
+                    ctx.fillText(run.text, x, base);
                 }
             }
         });
