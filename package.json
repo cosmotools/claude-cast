@@ -1,6 +1,6 @@
 {
   "name": "@cosmotools/claude-cast",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "description": "Several logged-in browser users for Claude Code: one persistent Chrome profile per person.",
   "license": "MIT",
   "private": true,
@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -p .",
     "test": "npm run build && node --test --test-concurrency=1 dist/test/*.test.js",
-    "demo": "node docs/demo/render.mjs"
+    "demo": "node docs/demo/render.mjs",
+    "shots": "npm run build && node scripts/ink-shots.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.31.0",

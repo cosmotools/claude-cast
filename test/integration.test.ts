@@ -7,6 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { chromium } from 'playwright-core';
 import { Gateway } from '../src/gateway.js';
 import { execFileSync, spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { pickBrowser } from '../src/browsers.js';
 import { isRunning, launchChrome } from '../src/chrome.js';
 import { type LoginWindow, openLoginWindow, readLogin, startLoginWindow } from '../src/login-window.js';
@@ -78,6 +79,77 @@ async function until(cond: () => boolean, ms = 15_000) {
 function gp(name: string) {
   const p = findProfile(sb.paths, name)!;
   return { name: p.name, dir: p.dir, outputDir: outputDir(sb.paths, p.name) };
+}
+
+interface Rect { x: number; y: number; width: number; height: number }
+interface Image { width: number; height: number; data: Buffer }
+const { PNG } = createRequire(import.meta.url)('playwright-core/lib/utilsBundle') as { PNG: { sync: { read(b: Buffer): Image } } };
+
+/**
+ * What the person sees in the profile's current tab, marks included, in CSS pixels, once it has settled:
+ * marks are animated in and follow the page a frame later, so two screenshots in a row must match.
+ */
+async function still(gateway: Gateway, profile: ReturnType<typeof gp>): Promise<Image> {
+  const shot = async () => {
+    const r = text(await gateway.call(profile, 'browser_run_code_unsafe', { code: 'async (page) => (await page.screenshot({ scale: "css" })).toString("base64")' }));
+    return Buffer.from(JSON.parse(/### Result\n(.+)/.exec(r)![1]) as string, 'base64');
+  };
+  let last = await shot();
+  for (const end = Date.now() + 10_000; Date.now() < end;) {
+    await new Promise(r => setTimeout(r, 200));
+    const next = await shot();
+    if (next.equals(last)) return PNG.sync.read(next);
+    last = next;
+  }
+  throw new Error('the page kept changing');
+}
+
+/**
+ * Pixels in the marks' red (#e5383b, green and blue alike) inside `r` grown by `pad`. Page content in the
+ * tests is never red; the orange and blue fringes of smoothed text have green and blue far apart.
+ */
+function red(img: Image, r: Rect, pad = 0): number {
+  let n = 0;
+  for (let y = Math.max(0, Math.floor(r.y - pad)); y < Math.min(img.height, r.y + r.height + pad); y++) {
+    for (let x = Math.max(0, Math.floor(r.x - pad)); x < Math.min(img.width, r.x + r.width + pad); x++) {
+      const i = (y * img.width + x) * 4;
+      const [cr, cg, cb] = [img.data[i], img.data[i + 1], img.data[i + 2]];
+      if (cr > 180 && cg < 110 && cb < 110 && Math.abs(cg - cb) < 30) n++;
+    }
+  }
+  return n;
+}
+
+/** The box of an element of the current tab in viewport coordinates; `expr` is evaluated in the page. */
+async function rect(gateway: Gateway, profile: ReturnType<typeof gp>, expr: string): Promise<Rect> {
+  const r = text(await gateway.call(profile, 'browser_evaluate', { function: `() => { const b = ${expr}; return { x: b.x, y: b.y, width: b.width, height: b.height }; }` }));
+  return JSON.parse(/### Result\n([\s\S]+?)(?:\n###|$)/.exec(r)![1]) as Rect;
+}
+
+/** Evaluates `expr` in cast's isolated world of the current tab, where the marks' script runs. */
+async function inInk(gateway: Gateway, profile: ReturnType<typeof gp>, expr: string): Promise<unknown> {
+  const r = text(await gateway.call(profile, 'browser_run_code_unsafe', {
+    code: `async (page) => {
+      const s = await page.context().newCDPSession(page);
+      const { frameTree } = await s.send("Page.getFrameTree");
+      const { executionContextId } = await s.send("Page.createIsolatedWorld", { frameId: frameTree.frame.id, worldName: "cast-ink" });
+      const r = await s.send("Runtime.evaluate", { expression: ${JSON.stringify(expr)}, contextId: executionContextId, returnByValue: true });
+      await s.detach();
+      return r.result.value;
+    }`,
+  }));
+  return JSON.parse(/### Result\n([\s\S]+?)(?:\n###|$)/.exec(r)![1]);
+}
+
+/** Retries `check` until it passes: the marks see that the page changed a frame later. */
+async function eventually(check: () => Promise<void>, ms = 5000) {
+  for (const end = Date.now() + ms; ; await new Promise(r => setTimeout(r, 100))) {
+    try {
+      return await check();
+    } catch (e) {
+      if (Date.now() > end) throw e;
+    }
+  }
 }
 
 function assertNoSecrets(output: string) {
@@ -283,6 +355,284 @@ describe('gateway', () => {
   test('browser_close is not proxied', async () => {
     await assert.rejects(gateway.call(gp('Sam'), 'browser_close', {}), /cast_close/);
   });
+
+  test('marks are drawn out of the page\'s reach and erased by the person or before Claude\'s input', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks` });
+    const ref = /button "Pay now" \[ref=(\w+)\]/.exec(text(await gateway.call(sam, 'browser_snapshot', {})))?.[1];
+    assert.ok(ref);
+    await assert.rejects(gateway.draw(sam, [{ target: '#missing' }]), /not on the page/);
+    assert.equal(await gateway.draw(sam, [{ target: ref, note: 'Нажмите здесь' }, { target: '#total', shape: 'underline' }]), undefined);
+    // The page sees one empty element, not what is drawn in it; the snapshot does not show it either.
+    const seen = await gateway.call(sam, 'browser_evaluate', {
+      function: '() => { const e = document.documentElement.lastElementChild; return [e.tagName, e.shadowRoot, e.childNodes.length, e.textContent].join("|"); }',
+    });
+    assert.match(text(seen), /### Result\s+"DIV\|\|0\|"/);
+    assert.doesNotMatch(text(await gateway.call(sam, 'browser_snapshot', {})), /Clear marks/);
+    // The person clicks the page: the next call says so.
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.mouse.click(5, 5); }' });
+    assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks by clicking the page/);
+    assert.equal(await gateway.erase('Sam'), false);
+    // The person presses "Clear marks" in the bottom right corner.
+    await gateway.draw(sam, [{ target: '#total' }]);
+    await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: 'async (page) => { const [w, h] = await page.evaluate(() => [innerWidth, innerHeight]); await page.mouse.click(w - 40, h - 30); }',
+    });
+    assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks with the "Clear marks" button/);
+    // Claude's own click erases them first, and nothing is reported.
+    await gateway.draw(sam, [{ target: ref, shape: 'box' }]);
+    await gateway.call(sam, 'browser_click', { target: ref });
+    assert.doesNotMatch(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks|marks are gone/);
+    await gateway.draw(sam, [{ target: ref, shape: 'arrow' }]);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('marks are drawn around their elements with notes off the text, and stay above a page dialog until Esc', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    const total = await rect(gateway, sam, 'document.getElementById("total").getBoundingClientRect()');
+    const words = await rect(gateway, sam, 'document.getElementById("text").getBoundingClientRect()');
+    const corner = await rect(gateway, sam, '({ x: innerWidth - 160, y: innerHeight - 60, width: 160, height: 60 })');
+    await gateway.draw(sam, [{ target: '#total', note: 'Should be $42' }]);
+    let img = await still(gateway, sam);
+    assert.ok(red(img, total, 25) > 100, 'the circle is around the total');
+    assert.ok(red(img, corner) > 0, 'the "Clear marks" button is shown');
+    const all = red(img, { x: 0, y: 0, width: img.width, height: img.height });
+    assert.ok(all - red(img, total, 25) - red(img, corner) > 100, 'the note is written');
+    assert.equal(red(img, words, 6), 0, 'the note keeps clear of the text beside the total');
+    // A page dialog opened later goes to the top layer; the marks come back above its backdrop, without the button.
+    await gateway.call(sam, 'browser_evaluate', { function: '() => document.getElementById("dialog").showModal()' });
+    img = await still(gateway, sam);
+    assert.ok(red(img, total, 25) > 100, 'the marks are above the backdrop');
+    assert.equal(red(img, corner), 0, 'the button is hidden while the dialog is open');
+    // Drawn while the dialog is open, the note still keeps clear of the text the backdrop dims.
+    await gateway.draw(sam, [{ target: '#total', note: 'Should be $42' }]);
+    img = await still(gateway, sam);
+    assert.ok(red(img, { x: 0, y: 0, width: img.width, height: img.height }) - red(img, total, 25) > 100, 'the note is written');
+    assert.equal(red(img, words, 6), 0, 'the note keeps clear of the text under the backdrop');
+    // Esc closes the dialog, not the marks; the next Esc erases them.
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.keyboard.press("Escape"); }' });
+    assert.match(text(await gateway.call(sam, 'browser_evaluate', { function: '() => document.getElementById("dialog").open' })), /### Result\s+false/);
+    assert.doesNotMatch(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks|marks are gone/);
+    assert.ok(red(await still(gateway, sam), corner) > 0, 'the button is back');
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.keyboard.press("Escape"); }' });
+    assert.match(text(await gateway.call(sam, 'browser_snapshot', {})), /erased your marks with Esc/);
+    assert.equal(red(await still(gateway, sam), total, 25), 0);
+  });
+
+  test('marks follow their element as the page scrolls, and inside an iframe', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    const far = 'document.getElementById("far").getBoundingClientRect()';
+    // The element below the fold is scrolled into view first.
+    await gateway.draw(sam, [{ target: '#far', shape: 'box' }]);
+    const before = await rect(gateway, sam, far);
+    assert.ok(before.y > 0 && before.y < 1000, `scrolled into view: ${before.y}`);
+    assert.ok(red(await still(gateway, sam), before, 20) > 100);
+    await gateway.call(sam, 'browser_evaluate', { function: '() => scrollBy(0, -100)' });
+    const after = await rect(gateway, sam, far);
+    assert.equal(Math.round(after.y - before.y), 100);
+    const img = await still(gateway, sam);
+    assert.ok(red(img, after, 20) > 100, 'the box moved with the element');
+    assert.equal(red(img, { ...before, height: 1 }), 0, 'and is gone from where it was');
+    // A ref inside an iframe: the mark is drawn in the main frame around where the button is shown.
+    await gateway.call(sam, 'browser_evaluate', { function: '() => scrollTo(0, 0)' });
+    const approve = /button "Approve" \[ref=(f\d+e\d+)\]/.exec(text(await gateway.call(sam, 'browser_snapshot', {})))?.[1];
+    assert.ok(approve);
+    await gateway.draw(sam, [{ target: approve, shape: 'box' }]);
+    const button = await rect(gateway, sam, '(() => { const f = document.querySelector("iframe").getBoundingClientRect(), b = document.querySelector("iframe").contentDocument.querySelector("button").getBoundingClientRect(); return { x: f.x + b.x, y: f.y + b.y, width: b.width, height: b.height }; })()');
+    assert.ok(red(await still(gateway, sam), button, 20) > 100);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('marks stay sharp on a high-density screen, also after the window moves to one', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    await gateway.draw(sam, [{ target: '#gone', shape: 'box' }]);
+    const box = await rect(gateway, sam, 'document.getElementById("gone").getBoundingClientRect()');
+    // Two device pixels per CSS pixel (Retina, or Windows at 200%), set after the marks are drawn. Playwright
+    // takes screenshots at its own scale, so this one comes from Chrome directly.
+    const r = text(await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: `async (page) => {
+        const s = await page.context().newCDPSession(page);
+        await s.send("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor: 2, mobile: false });
+        await new Promise(r => setTimeout(r, 2000));
+        const { data } = await s.send("Page.captureScreenshot", { format: "png" });
+        await s.send("Emulation.clearDeviceMetricsOverride");
+        return data;
+      }`,
+    }));
+    const img = PNG.sync.read(Buffer.from(JSON.parse(/### Result\n(.+)/.exec(r)![1]) as string, 'base64'));
+    assert.equal(img.width, 1600);
+    const area = { x: box.x * 2, y: box.y * 2, width: box.width * 2, height: box.height * 2 };
+    // Drawn at the screen's density, most of a stroke is the full red; a canvas stretched from CSS pixels
+    // smears it, and only about half is.
+    const all = red(img, area, 40);
+    let full = 0;
+    for (let y = Math.max(0, Math.floor(area.y - 40)); y < area.y + area.height + 40; y++) {
+      for (let x = Math.max(0, Math.floor(area.x - 40)); x < area.x + area.width + 40; x++) {
+        const i = (y * img.width + x) * 4;
+        if (img.data[i] > 215 && img.data[i + 1] < 70 && img.data[i + 2] < 70) full++;
+      }
+    }
+    assert.ok(all > 1000, `marks drawn: ${all}`);
+    assert.ok(full / all > 0.7, `sharp: ${full} of ${all} red pixels are full red`);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('marks leave the page alone: no searching it every frame, no listeners once erased', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    // Counted in cast's world before its script first runs there; the page's own calls are not counted.
+    await inInk(gateway, sam, `(() => {
+      const c = window.counts = { queries: 0, listeners: 0, observers: new Set() };
+      for (const k of ['querySelector', 'querySelectorAll']) {
+        const f = Document.prototype[k];
+        Document.prototype[k] = function (...a) { c.queries++; return f.apply(this, a); };
+      }
+      const add = EventTarget.prototype.addEventListener, remove = EventTarget.prototype.removeEventListener;
+      EventTarget.prototype.addEventListener = function (...a) { c.listeners++; return add.apply(this, a); };
+      EventTarget.prototype.removeEventListener = function (...a) { c.listeners--; return remove.apply(this, a); };
+      const observe = MutationObserver.prototype.observe, disconnect = MutationObserver.prototype.disconnect;
+      MutationObserver.prototype.observe = function (...a) { c.observers.add(this); return observe.apply(this, a); };
+      MutationObserver.prototype.disconnect = function () { c.observers.delete(this); return disconnect.apply(this); };
+      return true;
+    })()`);
+    const counts = async () => await inInk(gateway, sam, '({ queries: counts.queries, listeners: counts.listeners, observers: counts.observers.size })') as { queries: number; listeners: number; observers: number };
+    await gateway.draw(sam, [{ target: '#total', note: 'Should be $42' }]);
+    await still(gateway, sam);
+    const shown = await counts();
+    assert.ok(shown.listeners > 0 && shown.observers > 0, JSON.stringify(shown));
+    await new Promise(r => setTimeout(r, 1000));
+    // About 60 frames went by; a dialog opened or closed is noticed by the observer instead.
+    assert.ok((await counts()).queries - shown.queries <= 2, JSON.stringify(await counts()));
+    assert.equal(await gateway.erase('Sam'), true);
+    assert.deepEqual({ ...await counts(), queries: 0 }, { queries: 0, listeners: 0, observers: 0 });
+    // Erased by the person too.
+    await gateway.draw(sam, [{ target: '#total' }]);
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.mouse.click(650, 150); }' });
+    assert.deepEqual({ ...await counts(), queries: 0 }, { queries: 0, listeners: 0, observers: 0 });
+    // The button hides under a page dialog and comes back when the page removes the dialog while it is open.
+    const corner = await rect(gateway, sam, '({ x: innerWidth - 160, y: innerHeight - 60, width: 160, height: 60 })');
+    await gateway.draw(sam, [{ target: '#total' }]);
+    await gateway.call(sam, 'browser_evaluate', { function: '() => document.getElementById("dialog").showModal()' });
+    assert.equal(red(await still(gateway, sam), corner), 0);
+    await gateway.call(sam, 'browser_evaluate', { function: '() => document.getElementById("dialog").remove()' });
+    assert.ok(red(await still(gateway, sam), corner) > 0, 'the button is back');
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('a note sits next to the strokes of its mark, not next to a guess of where they are', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    const wide = await rect(gateway, sam, 'document.getElementById("wide").getBoundingClientRect()');
+    await gateway.draw(sam, [{ target: '#wide', note: 'Here' }]);
+    const img = await still(gateway, sam);
+    // Columns with red in the element's rows, right of its middle: the circle's right side, a gap, the note.
+    const band = { y: wide.y - 10, height: wide.height + 20 };
+    const has = (x: number) => red(img, { x, y: band.y, width: 1, height: band.height }) > 0;
+    let x = Math.round(wide.x + wide.width / 2);
+    while (x < img.width && !has(x)) x++;
+    while (x < img.width && has(x)) x++;
+    const end = x;
+    while (x < img.width && !has(x)) x++;
+    assert.ok(x < img.width, 'the note is beside the circle');
+    assert.ok(x - end < 22, `gap between the circle and its note: ${x - end}px`);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('a right-to-left note reads right to left', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    const wide = await rect(gateway, sam, 'document.getElementById("wide").getBoundingClientRect()');
+    // A one-letter word, then a long one: right to left, the long word is on the left. Several spaces
+    // make the gap between them wider than any gap between letters, whatever font the system has.
+    await gateway.draw(sam, [{ target: '#wide', note: 'א        בבבבבבבבבב' }]);
+    const img = await still(gateway, sam);
+    const band = { y: wide.y - 10, height: wide.height + 20 };
+    const has = (x: number) => red(img, { x, y: band.y, width: 1, height: band.height }) > 0;
+    // Past the circle's right side, the note: its widest gap is the space between the words. The
+    // "Clear marks" button is further right in the same rows.
+    const stop = img.width - 180;
+    let x = Math.round(wide.x + wide.width / 2);
+    while (x < stop && !has(x)) x++;
+    while (x < stop && has(x)) x++;
+    while (x < stop && !has(x)) x++;
+    const start = x;
+    let end = x, gap = { at: 0, width: 0 };
+    for (let run = 0; x < stop; x++) {
+      if (has(x)) {
+        if (run > gap.width) gap = { at: x - run, width: run };
+        run = 0;
+        end = x;
+      } else run++;
+    }
+    assert.ok(gap.width > 0 && end > start, 'the note is beside the circle');
+    const left = gap.at - start, right = end - (gap.at + gap.width);
+    assert.ok(left > right * 3, `the long word is on the left: ${left}px, then ${right}px`);
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('a note is written in one font when the handwriting does not cover it, and wraps', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    // Text drawn in the system font, recorded in cast's world; handwritten glyphs are paths, not text.
+    await inInk(gateway, sam, `(() => {
+      window.texts = new Set();
+      const fill = CanvasRenderingContext2D.prototype.fillText;
+      CanvasRenderingContext2D.prototype.fillText = function (t, ...a) { texts.add(this.direction + ' ' + t); return fill.call(this, t, ...a); };
+      return true;
+    })()`);
+    const drawn = async (note: string) => {
+      await inInk(gateway, sam, 'texts.clear(), true');
+      await gateway.draw(sam, [{ target: '#total', note }]);
+      await still(gateway, sam);
+      return [...await inInk(gateway, sam, '[...texts]') as string[]].sort();
+    };
+    assert.deepEqual(await drawn('Should be $42'), [], 'all handwritten');
+    assert.deepEqual(await drawn('Итог ≠ 42, Ґ'), ['ltr ≠'], 'a missing symbol alone falls back');
+    assert.deepEqual(await drawn('Tổng tiền sai'), ['ltr Tổng tiền sai'], 'words mixing both: all in one font');
+    assert.deepEqual(await drawn('合计应为 42'), ['ltr 合计应为 42'], 'mostly missing: all in one font');
+    assert.deepEqual(await drawn('שלום עולם'), ['rtl שלום עולם'], 'right to left, ordered by the browser');
+    assert.deepEqual(await drawn('סך 42 USD'), ['rtl סך 42 USD'], 'right to left, even when most of it is handwritten');
+    // Chinese has no spaces: a long note still wraps.
+    const lines = await drawn('这是一个很长的中文注释用来检查换行是否正常工作而不是一行写到底');
+    assert.ok(lines.length > 1, lines.join(' | '));
+    assert.equal(await gateway.erase('Sam'), true);
+  });
+
+  test('Claude learns that the marks are gone when the page changes under them', async () => {
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
+    await gateway.draw(sam, [{ target: '#gone' }]);
+    await gateway.call(sam, 'browser_evaluate', { function: '() => document.getElementById("gone").remove()' });
+    await eventually(async () => assert.match(text(await gateway.call(sam, 'browser_tabs', { action: 'list' })), /marks are gone: the page changed/));
+    // A reload by the page itself (not Claude's navigation, which erases first).
+    await gateway.draw(sam, [{ target: '#total' }]);
+    await gateway.call(sam, 'browser_run_code_unsafe', { code: 'async (page) => { await page.reload(); }' });
+    assert.match(text(await gateway.call(sam, 'browser_tabs', { action: 'list' })), /marks are gone: the page changed/);
+    assert.equal(await gateway.erase('Sam'), false);
+  });
+
+  test("marks are drawn after Claude's tab is brought in front of the tab the window shows", async () => {
+    // As after Claude's current tab was closed: Playwright's next tab is not always the one Chrome shows.
+    // A hidden tab's renderer runs at background priority on macOS, where drawing in it timed out.
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_tabs', { action: 'new', url: `${site.url}/marks` });
+    await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: 'async (page) => { await page.context().pages().find(p => p !== page).bringToFront(); }',
+    });
+    // The page notes whether it is shown when cast adds its element.
+    const seen = '() => document.visibilityState + "|" + (window.seen ?? "")';
+    await gateway.call(sam, 'browser_evaluate', {
+      function: '() => { new MutationObserver(() => { window.seen ??= document.visibilityState; }).observe(document.documentElement, { childList: true }); }',
+    });
+    assert.match(text(await gateway.call(sam, 'browser_evaluate', { function: seen })), /"hidden\|"/, "Claude's tab is behind another one");
+    await gateway.draw(sam, [{ target: '#total' }]);
+    assert.match(text(await gateway.call(sam, 'browser_evaluate', { function: seen })), /"visible\|visible"/);
+    await gateway.erase('Sam');
+    await gateway.call(sam, 'browser_tabs', { action: 'close' });
+  });
 });
 
 describe('macOS', { skip: !(process.platform === 'darwin' && headed) && 'macOS with CAST_TEST_HEADED=1' }, () => {
@@ -319,7 +669,7 @@ describe('cast MCP server', () => {
   test('lists cast and proxied tools', async () => {
     const { tools } = await client.listTools();
     const names = tools.map(t => t.name);
-    for (const n of ['cast_list', 'cast_open', 'cast_close', 'cast_add', 'cast_open_for_user', 'cast_user_window_result', 'cast_set_sites', 'cast_update', 'cast_remove', 'browser_click']) {
+    for (const n of ['cast_list', 'cast_open', 'cast_close', 'cast_add', 'cast_open_for_user', 'cast_user_window_result', 'cast_set_sites', 'cast_update', 'cast_remove', 'cast_draw', 'cast_erase', 'browser_click']) {
       assert.ok(names.includes(n), n);
     }
     // The Anthropic directory requires a title and read-only/destructive hints on every tool.
@@ -414,6 +764,27 @@ describe('cast MCP server', () => {
     assert.match(text(missing), /cast:add Nobody/);
     const noProfile = await client.callTool({ name: 'browser_snapshot', arguments: {} });
     assert.equal(noProfile.isError, true);
+  });
+
+  test('cast_draw checks its marks and reports them; cast_erase says whether there were any', async () => {
+    const draw = (marks: unknown) => client.callTool({ name: 'cast_draw', arguments: { profile: 'elon', marks } });
+    for (const [marks, error] of [
+      [[], /non-empty array/],
+      [Array.from({ length: 9 }, () => ({ target: 'h1' })), /At most 8 marks/],
+      [[{ target: 'h1', note: 'x'.repeat(121) }], /at most 120 characters/],
+      [[{ target: 'h1', shape: 'star' }], /shape/],
+      [[{ target: '#missing' }], /not on the page/],
+      [[{ target: 'h1, button' }], /matches 2 elements/],
+    ] as const) {
+      const r = await draw(marks);
+      assert.equal(r.isError, true, JSON.stringify(marks).slice(0, 80));
+      assert.match(text(r), error);
+    }
+    const drawn = await draw([{ target: 'h1', shape: 'underline', note: 'Здесь' }]);
+    assert.ok(!drawn.isError, text(drawn));
+    assert.match(text(drawn), /Drew 1 mark in "Elon"\. Tell the user to look at that window\./);
+    assert.match(text(await client.callTool({ name: 'cast_erase', arguments: { profile: 'elon' } })), /Erased the marks in "elon"/);
+    assert.match(text(await client.callTool({ name: 'cast_erase', arguments: { profile: 'elon' } })), /No marks are shown in "elon"/);
   });
 
   test('cast_remove deletes the entry and the Chrome data', async () => {

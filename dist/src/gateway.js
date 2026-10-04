@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { launchChrome } from './chrome.js';
 import { DialogGuard } from './dialogs.js';
+import { Ink } from './ink.js';
 import { INSTRUCTIONS_FILE } from './login-window.js';
 import { ensurePrivateDir } from './paths.js';
 import { VERSION } from './version.js';
@@ -52,7 +53,7 @@ export class Gateway {
         ensurePrivateDir(profile.outputDir);
         const chrome = await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
         const client = new Client({ name: 'cast', version: VERSION });
-        const child = { profile, chrome, client };
+        const child = { profile, chrome, client, ink: new Ink(chrome.endpoint) };
         const transport = spawnChild(['--cdp-endpoint', chrome.endpoint, '--output-dir', profile.outputDir], profile.outputDir);
         transport.onclose = () => {
             child.exited ??= 'the Playwright MCP process exited';
@@ -96,6 +97,7 @@ export class Gateway {
             ]);
         }
         // Chrome first: on disconnect Playwright closes the tabs it opened, and the saved session would be empty.
+        child.ink.close();
         await child.chrome.close();
         await child.client.close().catch(() => { });
         return wasOpen;
@@ -125,8 +127,9 @@ export class Gateway {
             throw new GatewayError(`${tool} is not available through cast; use cast_close.`);
         const child = await this.child(profile);
         try {
-            const result = await child.client.callTool({ name: tool, arguments: args });
-            return absoluteLinks(result, profile.outputDir);
+            const notice = await child.ink.before(tool).catch(() => undefined);
+            const result = absoluteLinks(await child.client.callTool({ name: tool, arguments: args }), profile.outputDir);
+            return notice ? { ...result, content: [{ type: 'text', text: notice }, ...result.content] } : result;
         }
         catch (e) {
             if (child.exited) {
@@ -135,6 +138,75 @@ export class Gateway {
             throw e;
         }
     }
+    /**
+     * Draws marks over the elements in the profile's current tab and brings it to the front. Targets are
+     * resolved like browser_click's (snapshot refs, iframes included); the first one is scrolled into view.
+     * Returns what happened to marks drawn before, if the person erased them.
+     */
+    async draw(profile, marks) {
+        const child = await this.child(profile);
+        const notice = await child.ink.before('cast_draw').catch(() => undefined);
+        const located = await child.client.callTool({
+            name: 'browser_run_code_unsafe',
+            arguments: { code: `async (page) => (${locateTargets.toString()})(page, ${JSON.stringify(marks.map(m => m.target))})` },
+        });
+        const text = resultText(located);
+        const json = /### Result\n(.+)/.exec(text)?.[1];
+        if (located.isError || !json)
+            throw new GatewayError(/### Error\n([^\n]+)/.exec(text)?.[1] ?? text.slice(0, 300));
+        const { targetId, boxes } = JSON.parse(json);
+        await child.ink.draw(targetId, marks.map((m, i) => ({ box: boxes[i], shape: m.shape ?? 'circle', ...(m.note ? { note: m.note } : {}) })));
+        return notice;
+    }
+    /** Erases the marks of an open profile; false when there were none. */
+    async erase(name) {
+        const child = this.children.get(name.toLowerCase());
+        return !!child && !child.exited && child.ink.erase();
+    }
+}
+/**
+ * Runs in Playwright MCP: boxes of the targets in main-frame viewport coordinates, and the tab's DevTools
+ * target id so cast can draw into it. Refs ("e12", "f1e3") resolve as in browser_click; anything else is a selector.
+ * Sent as `locateTargets.toString()`, so it must not use anything from outside the function.
+ */
+async function locateTargets(page, targets) {
+    const locate = (t) => page.locator(/^(f\d+)?e\d+$/.test(t) ? 'aria-ref=' + t : t);
+    for (const t of targets) {
+        const n = await locate(t).count().catch(() => 0);
+        if (n !== 1)
+            throw new Error(n ? '"' + t + '" matches ' + n + ' elements; use a ref from browser_snapshot.' : '"' + t + '" is not on the page; take a new browser_snapshot and use its refs.');
+    }
+    // The first target in the middle of the window, unless it is already in view.
+    const first = locate(targets[0]);
+    const [width, height] = await page.evaluate(() => [innerWidth, innerHeight]);
+    const box = await first.boundingBox({ timeout: 3000 }).catch(() => null);
+    if (!box || box.y < 0 || box.x < 0 || box.y + box.height > height || box.x + box.width > width) {
+        await first.evaluate(e => e.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => first.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => { }));
+    }
+    const boxes = [];
+    for (const t of targets) {
+        const box = await locate(t).boundingBox({ timeout: 3000 });
+        if (!box)
+            throw new Error('"' + t + '" is not visible.');
+        // A block of text is often much wider than its text: mark the text. Measured in the element's frame,
+        // shifted by where that frame's box is in the main frame.
+        const text = await locate(t).evaluate(e => {
+            const style = getComputedStyle(e);
+            if (style.display.startsWith('inline') || e.matches('button, input, select, textarea, img, svg, video, canvas, iframe'))
+                return null;
+            const r = e.getBoundingClientRect(), range = document.createRange();
+            range.selectNodeContents(e);
+            const c = range.getBoundingClientRect();
+            if (!c.width || !c.height)
+                return null;
+            return { x: Math.max(c.x, r.x) - r.x, y: Math.max(c.y, r.y) - r.y, width: Math.min(c.width, r.width), height: Math.min(c.height, r.height) };
+        }).catch(() => null);
+        boxes.push(text ? { x: box.x + text.x, y: box.y + text.y, width: text.width, height: text.height } : box);
+    }
+    const cdp = await page.context().newCDPSession(page);
+    const { targetInfo } = await cdp.send('Target.getTargetInfo');
+    await cdp.detach();
+    return { targetId: targetInfo.targetId, boxes };
 }
 /** Index of the one visible page, the tab in front of the window, or -1. Pages come in the order of browser_tabs. */
 const VISIBLE_TAB = 'async (page) => { const states = await Promise.all(page.context().pages()'

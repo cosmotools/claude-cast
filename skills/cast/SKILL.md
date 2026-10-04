@@ -33,6 +33,13 @@ Each window is the person's regular Chrome: it reopens their tabs from last time
 3. Verify in the other (Elon's chat shows it; use `browser_wait_for {profile, text}` for real-time updates). Check email the same way in the person's mail site.
 4. Report what each person saw.
 
+## Showing the person where to look
+When you point the user to something in a cast window (a wrong value, the button to press, where an error shows), draw on the page instead of describing where it is: `cast_draw {profile, marks: [{target, shape?, note?}]}`.
+- `target` is a ref from the latest `browser_snapshot` of that profile; `shape` is `circle` (default), `box`, `underline` or `arrow`; `note` is a few words in the user's language. Up to 8 marks; a new call replaces them.
+- cast brings that tab to the front. Tell the user which window to look at (the person's name is in its title).
+- The person erases the marks by clicking the page, Esc or the "Clear marks" button; the next call tells you. cast also erases them before your own clicks, typing and navigation. `cast_erase {profile}` removes them.
+- Marks are for the person watching, not part of a test: do not draw while checking an app.
+
 ## Dialogs
 If a response contains `### Modal state` (e.g. a `confirm` dialog), other tools will fail until you call `browser_handle_dialog {profile, accept: true|false}`.
 
