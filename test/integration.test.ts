@@ -477,6 +477,26 @@ describe('gateway', () => {
     assert.match(text(await gateway.call(sam, 'browser_tabs', { action: 'list' })), /marks are gone: the page changed/);
     assert.equal(await gateway.erase('Sam'), false);
   });
+
+  test("marks are drawn after Claude's tab is brought in front of the tab the window shows", async () => {
+    // As after Claude's current tab was closed: Playwright's next tab is not always the one Chrome shows.
+    // A hidden tab's renderer runs at background priority on macOS, where drawing in it timed out.
+    const sam = gp('Sam');
+    await gateway.call(sam, 'browser_tabs', { action: 'new', url: `${site.url}/marks` });
+    await gateway.call(sam, 'browser_run_code_unsafe', {
+      code: 'async (page) => { await page.context().pages().find(p => p !== page).bringToFront(); }',
+    });
+    // The page notes whether it is shown when cast adds its element.
+    const seen = '() => document.visibilityState + "|" + (window.seen ?? "")';
+    await gateway.call(sam, 'browser_evaluate', {
+      function: '() => { new MutationObserver(() => { window.seen ??= document.visibilityState; }).observe(document.documentElement, { childList: true }); }',
+    });
+    assert.match(text(await gateway.call(sam, 'browser_evaluate', { function: seen })), /"hidden\|"/, "Claude's tab is behind another one");
+    await gateway.draw(sam, [{ target: '#total' }]);
+    assert.match(text(await gateway.call(sam, 'browser_evaluate', { function: seen })), /"visible\|visible"/);
+    await gateway.erase('Sam');
+    await gateway.call(sam, 'browser_tabs', { action: 'close' });
+  });
 });
 
 describe('macOS', { skip: !(process.platform === 'darwin' && headed) && 'macOS with CAST_TEST_HEADED=1' }, () => {

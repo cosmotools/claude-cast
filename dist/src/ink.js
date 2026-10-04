@@ -5,6 +5,8 @@ import { inkPage } from './ink-page.js';
 const WORLD = 'cast-ink';
 const COLOR = '#e5383b';
 const BUTTON = 'Clear marks ✕';
+/** How long to wait for a tab brought to the front to be shown. */
+const VISIBLE_MS = 2000;
 /** Tools that act on the page as the person would: the marks are erased first, so any click on them is the person's. */
 const INPUT_TOOLS = new Set([
     'browser_click', 'browser_drag', 'browser_drop', 'browser_type', 'browser_press_key', 'browser_select_option',
@@ -49,6 +51,9 @@ export class Ink {
         if (this.shown && this.shown.sessionId !== sessionId)
             await cdp.send('Target.detachFromTarget', { sessionId: this.shown.sessionId }).catch(() => { });
         this.shown = { targetId, sessionId };
+        // Claude's tab may be behind another one (e.g. after its current tab was closed). Shown first: a hidden
+        // tab's renderer runs at background priority on macOS and may not run the script in time.
+        await this.front(targetId, sessionId);
         const options = { color: COLOR, button: BUTTON };
         try {
             await this.evaluate(`(${inkPage.toString()})(), window.__castInk.show(${JSON.stringify(marks)}, ${JSON.stringify(fontFor(marks))}, ${JSON.stringify(options)})`);
@@ -58,7 +63,6 @@ export class Ink {
             await this.release();
             throw new Error(`Cannot draw on this page: ${e.message.split('\n')[0]}`);
         }
-        await this.front(targetId, sessionId);
     }
     /** Before a call to the profile: what the person did with the marks, if Claude should know. Erases them before input tools. */
     async before(tool) {
@@ -117,7 +121,7 @@ export class Ink {
             throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text ?? 'failed');
         return r.result.value;
     }
-    /** The tab in front of its window and the window restored if minimized, so the person sees the marks. */
+    /** The tab in front of its window and the window restored if minimized, so the person sees the marks; waits until the tab is shown. */
     async front(targetId, sessionId) {
         const cdp = this.cdp;
         try {
@@ -129,5 +133,15 @@ export class Ink {
             // Headless Chrome has no windows.
         }
         await cdp.send('Page.bringToFront', {}, sessionId).catch(() => { });
+        // Chrome shows the tab a moment later. A window covered or on another Space may stay hidden: draw anyway.
+        // A page that does not answer (a dialog) is not waited for longer.
+        for (const end = Date.now() + VISIBLE_MS; Date.now() < end; await new Promise(r => setTimeout(r, 50))) {
+            const state = await Promise.race([
+                this.evaluate('document.visibilityState').catch(() => undefined),
+                new Promise(r => setTimeout(() => r(undefined), Math.max(0, end - Date.now())).unref()),
+            ]);
+            if (state !== 'hidden')
+                break;
+        }
     }
 }
