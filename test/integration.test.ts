@@ -545,8 +545,9 @@ describe('gateway', () => {
     const sam = gp('Sam');
     await gateway.call(sam, 'browser_navigate', { url: `${site.url}/marks-scene` });
     const wide = await rect(gateway, sam, 'document.getElementById("wide").getBoundingClientRect()');
-    // A one-letter word, then a long one: right to left, the long word is on the left.
-    await gateway.draw(sam, [{ target: '#wide', note: 'א בבבבבבבבבב' }]);
+    // A one-letter word, then a long one: right to left, the long word is on the left. Several spaces
+    // make the gap between them wider than any gap between letters, whatever font the system has.
+    await gateway.draw(sam, [{ target: '#wide', note: 'א        בבבבבבבבבב' }]);
     const img = await still(gateway, sam);
     const band = { y: wide.y - 10, height: wide.height + 20 };
     const has = (x: number) => red(img, { x, y: band.y, width: 1, height: band.height }) > 0;
