@@ -71,5 +71,13 @@ claude plugin validate --strict . # check the manifests
 
 - Everything in the repository is in English.
 - Pull requests go into `develop`. `main` holds only releases, merged from `develop`: the Claude directory and `/plugin marketplace add` install the head of `main`, and an Anthropic reviewer checks every commit the directory picks up (the plugin installs dependencies from a lockfile).
+- Tests:
+  - A bug fix starts with a test that reproduces the bug: it fails without the fix and passes with it. Name the test after the behavior, not the issue number.
+  - A feature comes with tests for what a user relies on: the main path, the edge cases and the errors it reports.
+  - Test at the lowest level that shows the behavior: a unit test when the logic can be called without Chrome, an integration test (real Chrome, `test/integration.test.ts`) when it depends on Chrome, Playwright MCP or the file system.
+  - Tests must be deterministic on Ubuntu, macOS and Windows: wait for a condition, not a fixed delay, and clean up the Chrome processes and folders they create.
+  - Do not delete or weaken an existing test to make a change pass; if the expected behavior changed, say so in the pull request.
+  - When a test is impractical (a real SSO login, a person closing a window, behavior headless Chrome does not have), the pull request says why and how the change was checked by hand.
+  - Changes to skill text, hook text or tool descriptions are checked with real `claude -p` runs, comparing the behavior before and after.
 - `dist/src` is committed so the plugin needs no build step after install: run `npm run build` and commit `dist/` with source changes.
 - Releases: bump the version in `package.json` and `.claude-plugin/plugin.json`, run `npm install` (updates `package-lock.json`), add a `CHANGELOG.md` entry. Users get updates only when the version changes. CI checks that the versions match; after the merge to `main` a workflow tags the version and publishes a GitHub release with its `CHANGELOG.md` section.
