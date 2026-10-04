@@ -56,6 +56,14 @@ try {
     { target: '#gone', shape: 'underline', note: 'Подчёркнуто' },
   ]);
   await shot('6-dark-page');
+
+  await scene();
+  await gateway.draw(profile, [
+    { target: '#total', note: 'סך הכול שגוי' },
+    { target: '#gone', note: 'Tổng tiền sai' },
+    { target: '#wide', note: 'Ґанок · 合计应为四十二元，这一行太长了需要换行' },
+  ]);
+  await shot('7-languages');
 } finally {
   await gateway.closeAll();
   await site.close();
