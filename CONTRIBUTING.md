@@ -77,6 +77,7 @@ claude plugin validate --strict . # check the manifests
   3. A look at screenshots: when a change alters what the person sees, save screenshots of the affected pages and look at them (legibility, overlaps). The pull request says what was looked at.
   4. A check by hand with a visible window, only for what headless Chrome and CI cannot do: a person closing or covering a window, a window coming to the front, a platform CI does not run headed, a real SSO login. The person logs in (`/cast:add`, `/cast:open`); Claude never does. List the steps and results in the pull request.
 - A check made by hand or with a one-off script becomes a test when headless Chrome can show it.
+- Make sure each new test can fail: break the code it checks for a moment (revert the fix, skip the step, change the condition) and see that this test fails. A test that passes either way checks nothing; for example, "no mark here" passes on a screenshot taken before an animation has drawn anything.
 - Tests must be deterministic on Ubuntu, macOS and Windows: wait for a condition, not a fixed delay, and clean up the Chrome processes and folders they create.
 - Do not delete or weaken an existing test to make a change pass; if the expected behavior changed, say so in the pull request.
 - Changes to skill text, hook text or tool descriptions are checked with real `claude -p` runs, comparing the behavior before and after.
