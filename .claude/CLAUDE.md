@@ -16,7 +16,7 @@ Core ideas:
 
 Status: Linux, macOS and Windows (Windows tested in CI only). Installed as `/plugin marketplace add cosmotools/claude-cast`, `/plugin install cast@cosmotools`. Planned work is under "Not done yet" in `CONTRIBUTING.md`.
 
-@CONTRIBUTING.md
+@../CONTRIBUTING.md
 
 ## Commands
 
