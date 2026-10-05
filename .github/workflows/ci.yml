@@ -48,9 +48,18 @@ jobs:
           test "$(node -p 'require("./package-lock.json").version')" = "$v" || { echo "::error::package-lock.json is not $v: run npm install"; exit 1; }
           test "$(node -p 'require("./.claude-plugin/plugin.json").version')" = "$v" || { echo "::error::.claude-plugin/plugin.json is not $v"; exit 1; }
           node .github/scripts/release-notes.mjs "$v" > /dev/null
+      # Claude Code needs Node 22; the tests above stay on 20, the oldest Node cast supports.
+      - uses: actions/setup-node@v7
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 22
       - name: Plugin manifests
         if: matrix.os == 'ubuntu-latest'
-        run: npx -y @anthropic-ai/claude-code plugin validate --strict .
+        # @latest: without a version npx runs the copy in the npm cache setup-node restores, so a
+        # check a newer Claude Code adds went unnoticed.
+        run: |
+          npx -y @anthropic-ai/claude-code@latest --version
+          npx -y @anthropic-ai/claude-code@latest plugin validate --strict .
 
   # The required check on main is "test": one result for all systems.
   test:
