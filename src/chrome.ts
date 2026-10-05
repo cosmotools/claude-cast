@@ -67,6 +67,7 @@ export async function launchChrome(dir: string, opts: LaunchOptions = {}): Promi
   rmSync(portFile, { force: true });
   if (opts.look?.color) applyColor(dir, opts.look.color);
   const restore = opts.restore && existsSync(join(dir, 'Default', 'Sessions'));
+  if (restore) clearCrashedExit(dir);
   if (restore && opts.look) nameSessionWindows(dir, opts.look.title);
 
   const args = [
@@ -222,6 +223,21 @@ export function applyColor(dir: string, color: string): void {
   writeFileSync(file, JSON.stringify(prefs), { mode: 0o600 });
 }
 
+/**
+ * After a crash Chrome neither restores the last session nor saves the new one until someone answers its
+ * "Restore pages?" prompt, and it keeps `exit_type: Crashed` on every exit until then. Nobody answers it in
+ * a cast window, so the profile lost every tab from then on. The session file still holds the tabs saved
+ * before the crash: marking the exit normal lets --restore-last-session restore them and Chrome save again.
+ */
+export function clearCrashedExit(dir: string): void {
+  const file = join(dir, 'Default', 'Preferences');
+  let prefs: Prefs;
+  try { prefs = JSON.parse(readFileSync(file, 'utf8')); } catch { return; } // Leave a file we cannot read to Chrome.
+  if (prefs.profile?.exit_type !== 'Crashed') return;
+  prefs.profile = { ...prefs.profile, exit_type: 'Normal' };
+  writeFileSync(file, JSON.stringify(prefs), { mode: 0o600 });
+}
+
 /** SNSS commands (components/sessions/core/session_service_commands.cc). */
 const SET_TAB_WINDOW = 0;
 const SET_WINDOW_USER_TITLE = 31;
@@ -277,7 +293,7 @@ function userTitleCommand(window: number, title: string): Buffer {
 }
 
 type Section = { theme?: Record<string, unknown>; [key: string]: unknown };
-type Prefs = { browser?: Section; extensions?: Section; [key: string]: unknown };
+type Prefs = { browser?: Section; extensions?: Section; profile?: { exit_type?: string; [key: string]: unknown }; [key: string]: unknown };
 
 /**
  * Whether a Chrome runs on this profile folder, by its SingletonLock ("<host>-<pid>"). On Windows Chrome

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.2 — 2026-10-03
+
+### Fixed
+- A profile no longer opens with an empty tab after Chrome crashed once (or was stopped by force). Chrome then waits for an answer to "Restore pages?" and, until it gets one, neither restores the last session nor saves the new one, so every tab opened afterwards was lost too. cast now marks the crashed exit as normal before starting Chrome, so the tabs saved before the crash come back and new ones are saved again.
+
 ## 0.13.1 — 2026-10-02
 
 ### Fixed

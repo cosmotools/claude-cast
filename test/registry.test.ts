@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'nod
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeEach, describe, test } from 'node:test';
-import { applyColor, launchChrome, nameSessionWindows } from '../src/chrome.js';
+import { applyColor, clearCrashedExit, launchChrome, nameSessionWindows } from '../src/chrome.js';
 import { briefList, windowLook } from '../src/format.js';
 import { normalizeSite, pageUrl } from '../src/login-window.js';
 import { type MacWindow, windowsClosed } from '../src/mac-windows.js';
@@ -246,6 +246,20 @@ describe('window look', () => {
     writeFileSync(file, '{broken');
     applyColor(dir, '#43a047');
     assert.equal(readFileSync(file, 'utf8'), '{broken', 'a file Chrome may still repair is left alone');
+  });
+
+  test('a crashed exit is marked normal, keeping the rest', () => {
+    const dir = join(sb.root, 'crashed');
+    const file = join(dir, 'Default', 'Preferences');
+    mkdirSync(join(dir, 'Default'), { recursive: true });
+    writeFileSync(file, JSON.stringify({ profile: { exit_type: 'Crashed', name: 'x' }, browser: { a: 1 } }));
+    clearCrashedExit(dir);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { profile: { exit_type: 'Normal', name: 'x' }, browser: { a: 1 } });
+
+    writeFileSync(file, '{broken');
+    clearCrashedExit(dir);
+    assert.equal(readFileSync(file, 'utf8'), '{broken');
+    clearCrashedExit(join(sb.root, 'none'));
   });
 });
 

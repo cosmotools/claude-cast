@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -201,6 +201,28 @@ describe('gateway', () => {
     await gateway.close('Sam');
     const tabs = await gateway.call(gp('Sam'), 'browser_tabs', { action: 'list' });
     assert.match(text(tabs), /\?tab=kept/);
+  });
+
+  test('tabs come back and are saved again after Chrome crashed', async () => {
+    const prefs = join(gp('Sam').dir, 'Default', 'Preferences');
+    const crash = () => {
+      const p = JSON.parse(readFileSync(prefs, 'utf8'));
+      writeFileSync(prefs, JSON.stringify({ ...p, profile: { ...p.profile, exit_type: 'Crashed' } }));
+    };
+    await gateway.call(gp('Sam'), 'browser_tabs', { action: 'new', url: `${site.url}/?tab=before-crash` });
+    await gateway.close('Sam');
+    crash();
+    let tabs = text(await gateway.call(gp('Sam'), 'browser_tabs', { action: 'list' }));
+    assert.match(tabs, /\?tab=before-crash\)$/m, tabs);
+    await gateway.call(gp('Sam'), 'browser_tabs', { action: 'new', url: `${site.url}/?tab=after-crash` });
+    await gateway.close('Sam');
+    tabs = text(await gateway.call(gp('Sam'), 'browser_tabs', { action: 'list' }));
+    assert.match(tabs, /\?tab=after-crash\)$/m, tabs);
+    for (const tab of ['before-crash', 'after-crash']) {
+      const index = Number(new RegExp(`^- (\\d+):.*\\?tab=${tab}\\)$`, 'm').exec(tabs)?.[1]);
+      await gateway.call(gp('Sam'), 'browser_tabs', { action: 'close', index });
+      tabs = text(await gateway.call(gp('Sam'), 'browser_tabs', { action: 'list' }));
+    }
   });
 
   test('the tab in front comes back in front, whatever number Playwright gives it', async () => {

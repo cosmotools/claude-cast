@@ -33,6 +33,8 @@ export async function launchChrome(dir, opts = {}) {
     if (opts.look?.color)
         applyColor(dir, opts.look.color);
     const restore = opts.restore && existsSync(join(dir, 'Default', 'Sessions'));
+    if (restore)
+        clearCrashedExit(dir);
     if (restore && opts.look)
         nameSessionWindows(dir, opts.look.title);
     const args = [
@@ -203,6 +205,26 @@ export function applyColor(dir, color) {
         custom_chrome_frame: false,
         theme: { ...prefs.browser?.theme, user_color2: argb, color_variant2: 3 },
     };
+    writeFileSync(file, JSON.stringify(prefs), { mode: 0o600 });
+}
+/**
+ * After a crash Chrome neither restores the last session nor saves the new one until someone answers its
+ * "Restore pages?" prompt, and it keeps `exit_type: Crashed` on every exit until then. Nobody answers it in
+ * a cast window, so the profile lost every tab from then on. The session file still holds the tabs saved
+ * before the crash: marking the exit normal lets --restore-last-session restore them and Chrome save again.
+ */
+export function clearCrashedExit(dir) {
+    const file = join(dir, 'Default', 'Preferences');
+    let prefs;
+    try {
+        prefs = JSON.parse(readFileSync(file, 'utf8'));
+    }
+    catch {
+        return;
+    } // Leave a file we cannot read to Chrome.
+    if (prefs.profile?.exit_type !== 'Crashed')
+        return;
+    prefs.profile = { ...prefs.profile, exit_type: 'Normal' };
     writeFileSync(file, JSON.stringify(prefs), { mode: 0o600 });
 }
 /** SNSS commands (components/sessions/core/session_service_commands.cc). */
