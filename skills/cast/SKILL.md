@@ -20,8 +20,9 @@ cast gives you several visible Chrome windows, one per person, each already logg
 Each window is the person's regular Chrome: it reopens their tabs from last time, and the current tab is one of them. `browser_navigate` loads the URL into the current tab and replaces what was there.
 1. Before the first action in a profile, call `browser_tabs {profile, action: "list"}`.
 2. If a tab already shows the site you need, `select` it and work there. Do not reload it unless the task needs a fresh page.
-3. Otherwise open a new tab: `browser_tabs {profile, action: "new", url}`.
-4. Use `browser_navigate` only in a tab you opened or selected for this task.
+3. Otherwise reuse one of your own tabs: a tab marked `(opened by Claude)` was opened by you, in this session or an earlier one. `select` it and `browser_navigate` there.
+4. If there is none, open a new tab: `browser_tabs {profile, action: "new", url}`. cast keeps at most 3 of your tabs per profile: opening another closes the oldest of them, never a tab of the person.
+5. Use `browser_navigate` only in a tab marked `(opened by Claude)` or one you opened or selected for this task.
 
 ## Reading pages
 - Action tools (`browser_navigate`, `browser_click`, `browser_type`…) return a link `[Snapshot](/abs/path.yml)` instead of the page. Call `browser_snapshot {profile}` to get the page with element refs, or read that file.

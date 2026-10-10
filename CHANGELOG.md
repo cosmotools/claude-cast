@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Tabs Claude opens no longer pile up across sessions. cast remembers which tabs Claude opened, also after the window is closed and opened again, marks them `(opened by Claude)` in tab lists so Claude can reuse them, and keeps at most 3 of them per profile: opening another closes the oldest. The person's own tabs are never closed.
+
 ## 0.13.2 — 2026-10-03
 
 ### Fixed

@@ -5,7 +5,7 @@ import { after, before, describe, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { chromium } from 'playwright-core';
-import { Gateway } from '../src/gateway.js';
+import { CLAUDE_TAB_LIMIT, Gateway } from '../src/gateway.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { pickBrowser } from '../src/browsers.js';
 import { isRunning, launchChrome } from '../src/chrome.js';
@@ -278,6 +278,27 @@ describe('gateway', () => {
     await gateway.call(gp('Elon'), 'browser_navigate', { url: site.url });
     const snap = await gateway.call(gp('Elon'), 'browser_snapshot', {});
     assert.match(text(snap), /Hello elon/);
+  });
+
+  test("tabs Claude opened are recognised after a restart and kept to a few; the person's tab stays", async () => {
+    addProfile(sb.paths, 'Tia', 'local', {});
+    const tabLines = (s: string) => s.split('\n').filter(l => /^- \d+:/.test(l));
+    // The person's own tab: the one the new profile starts with (Claude did not open it).
+    await gateway.call(gp('Tia'), 'browser_navigate', { url: `${site.url}/?tab=person` });
+    await gateway.close('Tia');
+    for (let round = 0; round < 5; round++) {
+      await gateway.call(gp('Tia'), 'browser_tabs', { action: 'new', url: `${site.url}/?tab=claude` });
+      await gateway.call(gp('Tia'), 'browser_navigate', { url: `${site.url}/?tab=claude&round=${round}` });
+      await gateway.close('Tia');
+      const tabs = tabLines(text(await gateway.call(gp('Tia'), 'browser_tabs', { action: 'list' })));
+      const claude = tabs.filter(l => l.includes('(opened by Claude)'));
+      assert.equal(claude.length, Math.min(round + 1, CLAUDE_TAB_LIMIT), tabs.join('\n'));
+      assert.ok(claude.some(l => l.endsWith(`&round=${round})`)), tabs.join('\n'));
+      const person = tabs.filter(l => !l.includes('(opened by Claude)'));
+      assert.equal(person.length, 1, tabs.join('\n'));
+      assert.ok(person[0].endsWith('/?tab=person)'), tabs.join('\n'));
+      await gateway.close('Tia');
+    }
   });
 
   test('browser_close is not proxied', async () => {

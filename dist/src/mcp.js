@@ -21,7 +21,7 @@ const CAST_TOOLS = [
     },
     {
         name: 'cast_open',
-        description: 'Open the visible Chrome of a profile, optionally with a URL in a new tab (the person\'s own tabs stay as they are). browser_* tools also open the profile automatically.',
+        description: 'Open the visible Chrome of a profile, optionally with a URL in a new tab (the person\'s own tabs stay as they are; at most 3 tabs opened by Claude are kept, the oldest is closed). browser_* tools also open the profile automatically.',
         annotations: { title: 'Open a profile', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         inputSchema: {
             type: 'object',
@@ -127,15 +127,9 @@ async function castTool(paths, gateway, tool, args) {
             const p = usable(paths, str(args, 'profile'));
             const gp = gatewayProfile(paths, p);
             // Playwright MCP starts Chrome lazily, so make a call that shows the window. A URL goes to a
-            // new tab: the current one is a tab the person left open, and navigating would replace it.
-            // An empty new tab (a new profile's only tab) is used instead of opening another one next to it.
+            // new tab (or an empty one): the current one is a tab the person left open.
             const url = optStr(args, 'url');
-            const tabs = await gateway.call(gp, 'browser_tabs', { action: 'list' });
-            let result = tabs;
-            if (url && blankCurrentTab(tabs))
-                result = await gateway.call(gp, 'browser_navigate', { url });
-            else if (url)
-                result = await gateway.call(gp, 'browser_tabs', { action: 'new', url });
+            const result = url ? await gateway.openTab(gp, url) : await gateway.call(gp, 'browser_tabs', { action: 'list' });
             return { ...result, content: [{ type: 'text', text: `Profile "${p.name}" is open.` }, ...result.content] };
         }
         case 'cast_close': {
@@ -299,11 +293,6 @@ function rawStr(args, key) {
 function optStr(args, key) {
     const v = args[key];
     return typeof v === 'string' && v.trim() ? v.trim() : undefined;
-}
-/** browser_tabs "list" shows the current tab as an empty new tab page or about:blank. */
-function blankCurrentTab(tabs) {
-    const text = tabs.content.map(c => (c.type === 'text' ? c.text : '')).join('\n');
-    return /^- \d+: \(current\) \[[^\]]*\]\((about:blank|(chrome|edge):\/\/(newtab|new-tab-page)\/?)\)$/m.test(text);
 }
 function ok(text) {
     return { content: [{ type: 'text', text }] };
