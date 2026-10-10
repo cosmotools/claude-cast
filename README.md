@@ -70,7 +70,7 @@ Names: latin letters, digits, `-`, `_`, up to 40 characters, starting with a let
 
 - **Windows are regular, visible Chrome.** Watch, take over or close them; Claude reopens a window when needed.
 - **Each person's window has its own color** and their name as the window title (`Sam (sends messages) · cast`; on Linux in the title bar), so two windows side by side are easy to tell apart. cast sets the theme color each time it opens the window.
-- **Logins and tabs are kept** between sessions.
+- **Logins and tabs are kept** between sessions. Claude opens its own tabs instead of replacing yours and keeps at most 3 of them per profile.
 - **Claude picks people by description.** It never guesses a role from a profile name. If no profile or several fit ("the vendor"), it asks you once and saves your answer. Change a description any time with `/cast:edit <name>`.
 - **Claude never logs in.** When a session expires, it asks you to run `/cast:open <name>` and log in again there.
 - **cast reads the browser history of its own profiles, nothing else.** When you close a window from `/cast:add` or `/cast:open`, cast reads the visits made in it to save the sites (as hosts). Never your personal Chrome profile, never cookies or page content. Details: [PRIVACY.md](PRIVACY.md).

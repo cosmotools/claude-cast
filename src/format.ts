@@ -3,8 +3,8 @@ import type { WindowLook } from './chrome.js';
 import type { Profile } from './registry.js';
 
 /** Each window restores the person's tabs, so Claude must not load a site over the current one. */
-const TABS_RULE = 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it or open a new tab '
-  + '(browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs.';
+const TABS_RULE = 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it, reuse a tab marked '
+  + '"(opened by Claude)" or open a new tab (browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs unless so marked.';
 
 /** Compact block for the SessionStart hook; a hint on how to add people when there are none. */
 export function briefList(profiles: Profile[]): string {
