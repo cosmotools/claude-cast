@@ -40,6 +40,12 @@ If a response contains `### Modal state` (e.g. a `confirm` dialog), other tools 
 ## Expired sessions — do not log in yourself
 If a site shows a login page instead of the app, stop working with that profile and ask the user to run `/cast:open <name>` and log in again there. If a tool says the user's window for that profile is still open, ask the user to finish and close it; after they say so, `cast_user_window_result {name}` shows what was saved. Never type passwords, never fill login forms, never call `cast_add` or `cast_open_for_user` on your own.
 
+## Blocked actions
+Claude Code may deny a `browser_*` call (a permission prompt the user declined, or auto mode). Stop and tell the user in plain words:
+- what the action does on the site and why it needs their consent, e.g. "pressing "Show in marketplace" publishes v0.2.4";
+- the choices: they do it themselves in that person's window, or they approve this one action and you try again.
+Do not show internal tool names such as `mcp__plugin_cast_cast__browser_click` or `browser_click`; if they want to allow such actions for good, point them to `/permissions`. Do not retry the same action another way.
+
 ## Privacy
 Profiles hold real sessions (mail included). Look only at what the task needs. Never print cookies, tokens or storage contents.
 
