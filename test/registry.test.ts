@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import { applyColor, clearCrashedExit, launchChrome, nameSessionWindows } from '../src/chrome.js';
 import { briefList, windowLook } from '../src/format.js';
 import { normalizeSite, pageUrl } from '../src/login-window.js';
-import { type MacWindow, windowsClosed } from '../src/mac-windows.js';
+import { type MacWindow, START_POLLS, watch, windowsClosed } from '../src/mac-windows.js';
 import { classifyHosts, isSignInHost } from '../src/sites.js';
 import { accountIdFor, ensurePrivateDir, listFile, profileDir, projectIdFor, resolvePaths } from '../src/paths.js';
 import {
@@ -319,6 +319,30 @@ describe('macOS window watcher', () => {
     assert.equal(windowsClosed(seen, [...helpers, win(10, false), win(12, true)]), false, 'a new window opened');
     assert.equal(windowsClosed(seen, [...helpers, win(12, false)]), false, 'the new one is minimized');
     assert.equal(windowsClosed(seen, helpers), true);
+  });
+
+  /** Runs the watcher over these listings, one per poll; the process stays alive unless `alive` says otherwise. */
+  async function watchListings(listings: (MacWindow[] | null | undefined)[], alive = () => true) {
+    let polls = 0;
+    let quit = false;
+    await watch({
+      list: () => listings[Math.min(polls, listings.length - 1)],
+      alive,
+      quit: () => { quit = true; },
+      wait: async () => { polls++; },
+    });
+    return { quit, polls };
+  }
+
+  test('a Chrome that macOS does not list yet is waited for, then quit when its window closes', async () => {
+    const { quit } = await watchListings([null, null, [], [...helpers, win(10, true)], helpers]);
+    assert.equal(quit, true);
+  });
+
+  test('a Chrome that exited, or a pid that runs another program, is never signalled', async () => {
+    assert.deepEqual(await watchListings([[...helpers, win(10, true)], null, helpers]), { quit: false, polls: 1 });
+    assert.deepEqual(await watchListings([null], () => false), { quit: false, polls: 0 });
+    assert.deepEqual(await watchListings([null]), { quit: false, polls: START_POLLS });
   });
 });
 

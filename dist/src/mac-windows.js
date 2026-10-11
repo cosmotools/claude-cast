@@ -56,30 +56,50 @@ export function windowsClosed(seen, windows) {
             seen.add(w.id);
     return seen.size > 0 && !windows.some(w => seen.has(w.id) || isBrowserWindow(w));
 }
-async function main(pid, executable) {
+/** Polls a minute for a Chrome that macOS does not list as an application yet, then gives up. */
+export const START_POLLS = 60;
+/**
+ * Quits Chrome once its windows are closed. macOS lists a new process as an application a little after it
+ * starts (about 40 ms after spawn), so a Chrome not listed yet is waited for, not taken for one that exited.
+ */
+export async function watch(steps) {
     const seen = new Set();
-    for (;;) {
-        const windows = listWindows(pid, executable);
-        if (windows === null)
+    let listed = false;
+    for (let polls = 0;; polls++) {
+        const windows = steps.list();
+        if (windows === null && (listed || polls >= START_POLLS || !steps.alive()))
             return;
-        if (windows === undefined) {
-            try {
-                process.kill(pid, 0);
-            }
-            catch {
-                return;
-            }
-        }
+        if (windows)
+            listed = true;
+        if (windows === undefined && !steps.alive())
+            return;
         if (windows && windowsClosed(seen, windows)) {
             // The same clean shutdown as closing the last window on Linux: cookies and History are flushed.
-            try {
-                process.kill(pid, 'SIGINT');
-            }
-            catch { /* already gone */ }
+            steps.quit();
             return;
         }
-        await new Promise(r => setTimeout(r, 1000));
+        await steps.wait();
     }
+}
+function alive(pid) {
+    try {
+        process.kill(pid, 0);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+async function main(pid, executable) {
+    await watch({
+        list: () => listWindows(pid, executable),
+        alive: () => alive(pid),
+        quit: () => { try {
+            process.kill(pid, 'SIGINT');
+        }
+        catch { /* already gone */ } },
+        wait: () => new Promise(r => setTimeout(r, 1000)),
+    });
 }
 if (process.argv[1] === fileURLToPath(import.meta.url))
     await main(Number(process.argv[2]), process.argv[3]);
