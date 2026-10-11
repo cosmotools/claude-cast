@@ -9,10 +9,10 @@ import { CLAUDE_TAB_LIMIT, Gateway } from '../src/gateway.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { pickBrowser } from '../src/browsers.js';
 import { isRunning, launchChrome } from '../src/chrome.js';
-import { type LoginWindow, openLoginWindow, readLogin, startLoginWindow } from '../src/login-window.js';
+import { INSTRUCTIONS_FILE, type LoginWindow, openLoginWindow, readLogin, startLoginWindow } from '../src/login-window.js';
 import { outputDir } from '../src/paths.js';
 import { addProfile, findProfile, updateProfile } from '../src/registry.js';
-import { type Sandbox, type TestSite, quitChrome, sandbox, startSite, text } from './helpers.js';
+import { type Sandbox, type TestSite, endpointOf, pageTargets, quitChrome, sandbox, startSite, text, visit } from './helpers.js';
 
 // CAST_TEST_HEADED=1 shows the windows (checks what headless cannot, e.g. navigator.webdriver).
 const headed = process.env.CAST_TEST_HEADED === '1';
@@ -102,13 +102,30 @@ describe('user window', () => {
     assert.equal(report(), '/report?webdriver=false');
   });
 
-  test('a profile that is already open is reported', async () => {
+  test('a profile open in a Chrome without a DevTools port is reported', async () => {
     addProfile(sb.paths, 'Busy', 'local', {});
     const dir = findProfile(sb.paths, 'Busy')!.dir;
-    const first = openLoginWindow(dir, { name: 'Busy', timeoutMs: 8000 });
-    await new Promise(r => setTimeout(r, 2500));
-    await assert.rejects(openLoginWindow(dir, { name: 'Busy' }), /already open/);
-    await first;
+    // E.g. a user window from an older cast, or Chrome started on the folder by hand.
+    const other = await launchChrome(dir);
+    try {
+      await assert.rejects(openLoginWindow(dir, { name: 'Busy' }), /already open/);
+    } finally {
+      await other.close();
+    }
+  });
+
+  test('opening the user window again reuses the window that is open', async () => {
+    addProfile(sb.paths, 'Again', 'local', {});
+    const dir = findProfile(sb.paths, 'Again')!.dir;
+    const first = await startLoginWindow(dir, { name: 'Again' });
+    const port = endpointOf(dir);
+    const second = await startLoginWindow(dir, { name: 'Again', sites: [new URL(site.url).host] });
+    assert.equal(endpointOf(dir), port);
+    const pages = (await pageTargets(endpointOf(dir))).map(t => t.url);
+    assert.equal(pages.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 2, pages.join('\n'));
+    assert.ok(pages.includes(`${site.url}/`), pages.join('\n'));
+    await second.chrome.close();
+    await first.chrome.exited;
   });
 
   test('a window closed after its Claude session ended is saved at the next session start', async () => {
@@ -428,10 +445,9 @@ describe('cast MCP server', () => {
     const dir = findProfile(sb.paths, 'Ann')!.dir;
     assert.ok(isRunning(dir));
 
-    assert.match(text(await client.callTool({ name: 'cast_user_window_result', arguments: { name: 'ann' } })), /still open/);
     const busy = await client.callTool({ name: 'browser_snapshot', arguments: { profile: 'Ann' } });
     assert.equal(busy.isError, true);
-    assert.match(text(busy), /user window for "Ann" is still open/);
+    assert.match(text(busy), /may be signing in there.*cast_user_window_result/);
 
     // The human closes the window.
     await quitChrome(dir);
@@ -439,6 +455,47 @@ describe('cast MCP server', () => {
     const result = await client.callTool({ name: 'cast_user_window_result', arguments: { name: 'Ann' } });
     assert.match(text(result), /user window for "Ann" is closed/);
     assert.ok(findProfile(sb.paths, 'Ann')!.lastLoginAt);
+  });
+
+  test('nothing attaches to the user window until the user is done; then Claude works in that window and lets go of it', async () => {
+    await client.callTool({ name: 'cast_add', arguments: { name: 'Uma', description: 'approver' } });
+    const dir = findProfile(sb.paths, 'Uma')!.dir;
+    const port = endpointOf(dir);
+    await visit(dir, `${site.url}/login?user=uma&to=/uma/home`);
+    // Claude tries to act while the person signs in: refused, and no page gets a debugger attached.
+    assert.equal((await client.callTool({ name: 'browser_tabs', arguments: { profile: 'Uma', action: 'list' } })).isError, true);
+    assert.equal((await client.callTool({ name: 'cast_open', arguments: { profile: 'Uma' } })).isError, true);
+    let pages = await pageTargets(endpointOf(dir));
+    assert.ok(pages.length >= 2 && pages.every(p => !p.attached), JSON.stringify(pages));
+
+    // The person says they are done and keeps the window.
+    const result = text(await client.callTool({ name: 'cast_user_window_result', arguments: { name: 'Uma' } }));
+    assert.match(result, /stays open and Claude can work in it/);
+    assert.deepEqual(findProfile(sb.paths, 'Uma')!.sites, [new URL(site.url).host]);
+
+    // Claude works in the same Chrome, with the person's tab; the instruction tab is closed.
+    const tabs = text(await client.callTool({ name: 'browser_tabs', arguments: { profile: 'Uma', action: 'list' } }));
+    assert.equal(endpointOf(dir), port);
+    assert.match(tabs, /\/uma\/home\)$/m, tabs);
+    assert.doesNotMatch(tabs, new RegExp(INSTRUCTIONS_FILE));
+    await client.callTool({ name: 'browser_tabs', arguments: { profile: 'Uma', action: 'new', url: `${site.url}/?by=claude` } });
+    assert.match(text(await client.callTool({ name: 'browser_snapshot', arguments: { profile: 'Uma' } })), /Hello uma/);
+    pages = await pageTargets(endpointOf(dir));
+    assert.ok(pages.some(p => p.attached), JSON.stringify(pages));
+
+    // cast_close lets go: the window, its tabs and Claude's tab stay; nothing is attached any more.
+    assert.match(text(await client.callTool({ name: 'cast_close', arguments: { profile: 'Uma' } })), /stays open/);
+    assert.ok(isRunning(dir));
+    await until(() => false, 1000).catch(() => {});
+    pages = await pageTargets(endpointOf(dir));
+    assert.ok(pages.some(p => p.url.endsWith('/uma/home')) && pages.some(p => p.url.endsWith('/?by=claude')), JSON.stringify(pages));
+    assert.ok(pages.every(p => !p.attached), JSON.stringify(pages));
+
+    // /cast:open again while it is open: the same window; Claude waits again until the user is done.
+    await client.callTool({ name: 'cast_open_for_user', arguments: { name: 'Uma' } });
+    assert.equal(endpointOf(dir), port);
+    assert.equal((await client.callTool({ name: 'browser_snapshot', arguments: { profile: 'Uma' } })).isError, true);
+    await quitChrome(dir);
   });
 
   test('cast_update changes email and description without a login', async () => {

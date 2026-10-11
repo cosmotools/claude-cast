@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import initSqlJs from 'sql.js';
-import { launchChrome } from './chrome.js';
+import { launchChrome, runningChrome } from './chrome.js';
 import { ensurePrivateDir } from './paths.js';
 import { classifyHosts } from './sites.js';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -11,28 +11,35 @@ export const INSTRUCTIONS_FILE = 'cast-login.html';
 /** Chrome stores times as microseconds since 1601-01-01. */
 const CHROME_EPOCH_OFFSET_US = 11_644_473_600_000_000;
 /**
- * Opens the profile in a plain Chrome for the human and returns at once. Chrome runs detached, so the
- * window outlives cast and the Claude session; what was visited is read later with readLogin.
+ * Opens the profile's Chrome for the human and returns at once. Chrome runs detached, so the window
+ * outlives cast and the Claude session; what was visited is read later with readLogin. When the
+ * profile's Chrome already runs with a DevTools port (the person's window, or one Claude attached to and
+ * detached from), the instruction page and sites open as new tabs there.
  *
- * Nothing drives this window: no Playwright and no DevTools port. Either one makes pages see
- * navigator.webdriver = true, and SSO bot checks (GoDaddy, Okta…) refuse to log in there.
- * The previous session's tabs come back.
+ * Nothing attaches to its pages while the person signs in: SSO bot checks (GoDaddy-federated Microsoft
+ * 365) refuse a browser that Playwright is attached to, even with navigator.webdriver = false. The window
+ * has the same DevTools port and flags as Claude's window, so Claude can attach to it once the person is
+ * done. The previous session's tabs come back.
  */
 export async function startLoginWindow(dir, opts) {
-    const test = process.env.CAST_TEST_HEADLESS === '1';
     // Inside the profile, not in /tmp: the session is restored later and the tab must still load.
     ensurePrivateDir(dir);
     const instructions = join(dir, INSTRUCTIONS_FILE);
     writeFileSync(instructions, instructionPage(opts.name, opts.sites ?? []));
     const startedAt = new Date(Date.now() - 1000);
-    const chrome = await launchChrome(dir, {
+    const urls = [pathToFileURL(instructions).href, ...(opts.sites ?? []).map(siteUrl)];
+    const running = await runningChrome(dir);
+    // Opening tabs over HTTP creates targets without attaching to any page.
+    if (running)
+        for (const url of urls)
+            await fetch(`${running.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+    const chrome = running ?? await launchChrome(dir, {
         restore: true,
         look: opts.look,
         browser: opts.browser,
         detached: true,
-        // Tests play the human over a DevTools port; real user windows never get one.
-        debugPort: test && !!opts.onReady,
-        urls: [pathToFileURL(instructions).href, ...(opts.sites ?? []).map(siteUrl)],
+        debugPort: true,
+        urls,
     });
     try {
         if (opts.onReady)
@@ -129,9 +136,9 @@ h1{font-size:1.6rem}li{margin:.4rem 0}</style>
 <ol>
 <li>Open a new tab and log in everywhere ${esc(name)} needs: your app, email, SSO, chat…</li>
 <li>When asked about MFA or “Stay signed in”, choose to stay signed in.</li>
-<li><b>Close this window</b> when you are done, then tell Claude.</li>
+<li>When you are done, <b>tell Claude</b>. You can keep this window: Claude then works in it. Or close it.</li>
 </ol>
 ${known}
-<p>This is a regular Chrome: nothing is automated while you log in. cast never stores or types passwords; it only notes which sites you visited and the last page on each (no cookies).</p>
+<p>This is a regular Chrome: nothing is automated while you log in, and Claude does not act here until you say you are done. cast never stores or types passwords; it only notes which sites you visited and the last page on each (no cookies).</p>
 <p>You can leave Claude Code meanwhile: cast reads the visited sites once the window is closed.</p>`;
 }

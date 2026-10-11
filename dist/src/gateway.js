@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { launchChrome } from './chrome.js';
+import { launchChrome, runningChrome } from './chrome.js';
 import { hideCredentials } from './credentials.js';
 import { DialogGuard } from './dialogs.js';
 import { INSTRUCTIONS_FILE } from './login-window.js';
@@ -28,7 +28,9 @@ export class GatewayError extends Error {
 /**
  * One regular Chrome plus one @playwright/mcp child per open profile; browser_* calls are routed by
  * profile name. cast starts Chrome itself (restoring the previous tabs) and Playwright MCP attaches
- * to it over the DevTools port, so the window behaves like the person's normal Chrome.
+ * to it over the DevTools port, so the window behaves like the person's normal Chrome. A window the
+ * person opened with /cast:open runs with a DevTools port too: cast attaches to it instead of starting
+ * another Chrome, and only detaches from it when closing.
  */
 export class Gateway {
     children = new Map();
@@ -37,6 +39,10 @@ export class Gateway {
     isOpen(name) {
         const child = this.children.get(name.toLowerCase());
         return !!child && !child.exited;
+    }
+    /** Whether cast attached to a window the person opened, which cast_close leaves open. */
+    isJoined(name) {
+        return !!this.children.get(name.toLowerCase())?.joined;
     }
     openNames() {
         return [...this.children.values()].filter(c => !c.exited).map(c => c.profile.name);
@@ -60,13 +66,15 @@ export class Gateway {
     }
     async start(profile) {
         ensurePrivateDir(profile.outputDir);
-        const chrome = await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
+        const running = await runningChrome(profile.dir);
+        const chrome = running ?? await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
         const client = new Client({ name: 'cast', version: VERSION });
-        const child = { profile, chrome, client, claudeTabs: [] };
+        const child = { profile, chrome, client, claudeTabs: [], joined: !!running };
         const transport = spawnChild(['--cdp-endpoint', chrome.endpoint, '--output-dir', profile.outputDir], profile.outputDir);
         transport.onclose = () => {
             child.exited ??= 'the Playwright MCP process exited';
-            chrome.close().catch(() => { });
+            if (!child.joined)
+                chrome.close().catch(() => { });
         };
         chrome.exited.then(() => {
             // Usually the human closed the window; the next call opens it again.
@@ -81,7 +89,10 @@ export class Gateway {
             child.claudeTabs = await restoreClaudeTabs(chrome.endpoint, profile.dir).catch(() => []);
         }
         catch (e) {
-            await chrome.close();
+            if (child.joined)
+                await client.close().catch(() => { });
+            else
+                await chrome.close();
             throw e;
         }
         finally {
@@ -98,6 +109,13 @@ export class Gateway {
         this.children.delete(key);
         const wasOpen = !child.exited;
         child.exited ??= 'closed by cast';
+        if (child.joined) {
+            // The person's window: detaching leaves Chrome and every tab as they are.
+            if (wasOpen)
+                await saveClaudeTabs(child).catch(() => { });
+            await child.client.close().catch(() => { });
+            return wasOpen;
+        }
         // An open dialog keeps Chrome from closing on Windows (Browser.close does not finish, and the forced
         // stop loses the session and recent cookies): cancel it first. "No dialog" errors are ignored.
         if (wasOpen) {

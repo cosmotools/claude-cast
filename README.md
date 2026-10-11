@@ -43,7 +43,7 @@ Profiles and logins are kept, except once when updating from a version before 0.
 ## Get started
 
 1. `/cast:add Sam "sends messages" sam@example.com` — the description says who this person is in your tests and is required: Claude picks profiles by it. Leave it out and Claude asks for it before the window opens.
-2. A Chrome window opens. Log in everywhere Sam needs (your app, SSO, email), choose **"Stay signed in"** on MFA, then **close the window** and tell Claude. You may leave Claude Code meanwhile: cast saves what you visited once the window is closed.
+2. A Chrome window opens. Log in everywhere Sam needs (your app, SSO, email), choose **"Stay signed in"** on MFA, then tell Claude. Keep the window open and Claude works in it, or close it. Claude does not touch the window while you sign in. You may leave Claude Code meanwhile: cast saves what you visited once the window is closed.
 3. cast saves the sites where you landed (e.g. `app.example.com`; sign-in pages are left out). Change them any time, e.g. `/cast:edit Sam +admin.example.com -old.example.com`.
 
 Now every Claude Code session in this project knows Sam. Just ask:
@@ -132,7 +132,7 @@ Team slots in a project's `.claude/claude-cast.yaml` stay in that repository; de
 - **No window / no browser found:** cast looks for Google Chrome, Edge, Brave, Chromium and Vivaldi in their usual places and in `PATH` (macOS: `/Applications` or `~/Applications`; Windows: `Program Files` or `AppData\Local`); set `CAST_CHROME` to the browser's executable if it lives elsewhere. A Flatpak browser cannot be used: its sandbox hides the profile folder and the process; install the .deb or .rpm package instead. Snap browsers work. On Linux, start Claude Code from a desktop session (`DISPLAY` set), not plain SSH. When Chrome exits right after starting, cast shows its last message; the full output is in `cast-chrome.log` in the profile folder: `~/.claude/plugins/data/cast-<marketplace>/data/projects/<project>-<hash>/<name>/`, or `…/data/user/<name>/` for `--scope user` (Claude can tell you the exact path).
 - **"Profile is already open":** one profile, one Chrome. Close the other window (yours from `/cast:add` or `/cast:open`, or another Claude session).
 - **SSO blocks the login:** log in only in the `/cast:add` or `/cast:open` window; it is a plain Chrome nothing controls.
-- **Claude says your window is still open:** close it (titled `… · your window · cast`), then tell Claude. On macOS, closing a cast window quits that Chrome within a second; a minimized window counts as open.
+- **Claude waits for your window:** tell Claude when you have signed in (the window titled `… · your window · cast` can stay open), or close it. On macOS, closing a cast window quits that Chrome within a second; a minimized window counts as open.
 - **Profiles missing:** local profiles belong to one project folder; use `--scope user` for profiles you need everywhere. Profiles also belong to one Claude Code account (`CLAUDE_CONFIG_DIR`) and one install source (see [Where data lives](#where-data-lives)). Profiles made before 0.13.0 stay in the old folders (`~/.config/claude-cast/`, `~/.local/share/claude-cast/`, on Windows `%APPDATA%` and `%LOCALAPPDATA%`); [CHANGELOG.md](CHANGELOG.md) (0.13.0) says how to move them.
 
 ## Similar tools

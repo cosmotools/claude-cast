@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Browser } from './browsers.js';
-import { type Chrome, type WindowLook, launchChrome } from './chrome.js';
+import { type Chrome, type WindowLook, launchChrome, runningChrome } from './chrome.js';
 import { hideCredentials } from './credentials.js';
 import { DialogGuard } from './dialogs.js';
 import { INSTRUCTIONS_FILE } from './login-window.js';
@@ -48,6 +48,11 @@ interface Child {
   claudeTabs: string[];
   /** The CLAUDE_TABS_FILE content last written. */
   savedTabs?: string;
+  /**
+   * Chrome was already running (the person's window from /cast:open): cast attached to it and leaves it
+   * open when it detaches.
+   */
+  joined: boolean;
   /** Set when Chrome or the Playwright MCP child went away without cast closing them. */
   exited?: string;
 }
@@ -57,7 +62,9 @@ export class GatewayError extends Error {}
 /**
  * One regular Chrome plus one @playwright/mcp child per open profile; browser_* calls are routed by
  * profile name. cast starts Chrome itself (restoring the previous tabs) and Playwright MCP attaches
- * to it over the DevTools port, so the window behaves like the person's normal Chrome.
+ * to it over the DevTools port, so the window behaves like the person's normal Chrome. A window the
+ * person opened with /cast:open runs with a DevTools port too: cast attaches to it instead of starting
+ * another Chrome, and only detaches from it when closing.
  */
 export class Gateway {
   private children = new Map<string, Child>();
@@ -67,6 +74,11 @@ export class Gateway {
   isOpen(name: string): boolean {
     const child = this.children.get(name.toLowerCase());
     return !!child && !child.exited;
+  }
+
+  /** Whether cast attached to a window the person opened, which cast_close leaves open. */
+  isJoined(name: string): boolean {
+    return !!this.children.get(name.toLowerCase())?.joined;
   }
 
   openNames(): string[] {
@@ -92,13 +104,14 @@ export class Gateway {
 
   private async start(profile: GatewayProfile): Promise<Child> {
     ensurePrivateDir(profile.outputDir);
-    const chrome = await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
+    const running = await runningChrome(profile.dir);
+    const chrome = running ?? await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
     const client = new Client({ name: 'cast', version: VERSION });
-    const child: Child = { profile, chrome, client, claudeTabs: [] };
+    const child: Child = { profile, chrome, client, claudeTabs: [], joined: !!running };
     const transport = spawnChild(['--cdp-endpoint', chrome.endpoint!, '--output-dir', profile.outputDir], profile.outputDir);
     transport.onclose = () => {
       child.exited ??= 'the Playwright MCP process exited';
-      chrome.close().catch(() => {});
+      if (!child.joined) chrome.close().catch(() => {});
     };
     chrome.exited.then(() => {
       // Usually the human closed the window; the next call opens it again.
@@ -112,7 +125,8 @@ export class Gateway {
       await settleTabs(client);
       child.claudeTabs = await restoreClaudeTabs(chrome.endpoint!, profile.dir).catch(() => []);
     } catch (e) {
-      await chrome.close();
+      if (child.joined) await client.close().catch(() => {});
+      else await chrome.close();
       throw e;
     } finally {
       dialogs.stop();
@@ -128,6 +142,12 @@ export class Gateway {
     this.children.delete(key);
     const wasOpen = !child.exited;
     child.exited ??= 'closed by cast';
+    if (child.joined) {
+      // The person's window: detaching leaves Chrome and every tab as they are.
+      if (wasOpen) await saveClaudeTabs(child).catch(() => {});
+      await child.client.close().catch(() => {});
+      return wasOpen;
+    }
     // An open dialog keeps Chrome from closing on Windows (Browser.close does not finish, and the forced
     // stop loses the session and recent cookies): cancel it first. "No dialog" errors are ignored.
     if (wasOpen) {
