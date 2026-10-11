@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import initSqlJs from 'sql.js';
 import type { Browser } from './browsers.js';
-import { type Chrome, type WindowLook, launchChrome, runningChrome } from './chrome.js';
+import { type Chrome, type WindowLook, hasSession, launchChrome, runningChrome } from './chrome.js';
 import { ensurePrivateDir } from './paths.js';
 import { classifyHosts } from './sites.js';
 
@@ -71,24 +71,21 @@ export async function startLoginWindow(dir: string, opts: LoginWindowOptions): P
   const instructions = join(dir, INSTRUCTIONS_FILE);
   writeFileSync(instructions, instructionPage(opts.name, opts.sites ?? []));
   const startedAt = new Date(Date.now() - 1000);
-  const urls = [pathToFileURL(instructions).href, ...(opts.sites ?? []).map(siteUrl)];
+  const instructionsUrl = pathToFileURL(instructions).href;
+  const sites = (opts.sites ?? []).map(siteUrl);
 
   const running = await runningChrome(dir);
-  if (running?.endpoint) {
-    // A site already open in a tab (Teams the person left open) is not opened a second time.
-    const open = await openHosts(running.endpoint);
-    const missing = urls.filter(url => { const host = httpHost(url); return !host || !open.has(host); });
-    // Opening tabs over HTTP creates targets without attaching to any page.
-    for (const url of missing) await fetch(`${running.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
-  }
+  // A restored session already holds the tabs the person had: they are added to, not opened again.
+  const restoring = !running && hasSession(dir);
   const chrome = running ?? await launchChrome(dir, {
     restore: true,
     look: opts.look,
     browser: opts.browser,
     detached: true,
     debugPort: true,
-    urls,
+    urls: restoring ? [] : [instructionsUrl, ...sites],
   });
+  if ((running || restoring) && chrome.endpoint) await addTabs(chrome.endpoint, instructionsUrl, sites, restoring);
   try {
     if (opts.onReady) await opts.onReady({ endpoint: chrome.endpoint, close: () => { chrome.close().catch(() => {}); } });
   } catch (e) {
@@ -111,10 +108,42 @@ export async function openLoginWindow(dir: string, opts: LoginWindowOptions): Pr
   return { ...await readLogin(dir, startedAt), timedOut };
 }
 
-/** Hosts shown in the browser's tabs, read over HTTP without attaching to any page. */
-async function openHosts(endpoint: string): Promise<Set<string>> {
-  const targets = await (await fetch(`${endpoint}/json/list`)).json() as { type: string; url: string }[];
-  return new Set(targets.filter(t => t.type === 'page').map(t => httpHost(t.url)).filter((h): h is string => !!h));
+interface Tab { id: string; url: string }
+
+/** The browser's tabs, read over HTTP without attaching to any page. */
+async function pageTabs(endpoint: string): Promise<Tab[]> {
+  const targets = await (await fetch(`${endpoint}/json/list`)).json() as (Tab & { type: string })[];
+  return targets.filter(t => t.type === 'page');
+}
+
+/** The tabs once Chrome has restored the session: the list is not empty and stops changing (up to 5 s). */
+async function restoredTabs(endpoint: string): Promise<Tab[]> {
+  const deadline = Date.now() + 5000;
+  let last = '';
+  for (;;) {
+    const tabs = await pageTabs(endpoint);
+    const ids = tabs.map(t => t.id).join();
+    if ((tabs.length && ids === last) || Date.now() > deadline) return tabs;
+    last = ids;
+    await new Promise(r => setTimeout(r, 250));
+  }
+}
+
+/**
+ * Opens the instruction page and the sites not open yet (Teams the person left open is not opened a second
+ * time) in a window that has tabs already. Earlier instruction pages are closed after the new one opens, so
+ * the window is never left without a tab. Over HTTP: no page is attached while the person signs in.
+ */
+async function addTabs(endpoint: string, instructionsUrl: string, sites: string[], restoring: boolean): Promise<void> {
+  const tabs = restoring ? await restoredTabs(endpoint) : await pageTabs(endpoint);
+  const open = new Set(tabs.map(t => httpHost(t.url)).filter(h => h));
+  // The instruction page last: the newest tab is the one in front.
+  for (const url of [...sites.filter(url => !open.has(httpHost(url))), instructionsUrl]) {
+    await fetch(`${endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+  }
+  // Compared by name: Chrome may spell the file URL differently (drive letter, escapes).
+  const earlier = tabs.filter(t => t.url.startsWith('file:') && t.url.endsWith(`/${INSTRUCTIONS_FILE}`));
+  for (const tab of earlier) await fetch(`${endpoint}/json/close/${tab.id}`);
 }
 
 /** "https://app.example.com/vendor?code=…#x" → "https://app.example.com/vendor" */
