@@ -462,6 +462,7 @@ describe('cast MCP server', () => {
     const dir = findProfile(sb.paths, 'Uma')!.dir;
     const port = endpointOf(dir);
     await visit(dir, `${site.url}/login?user=uma&to=/uma/home`);
+    await until(() => site.hits.includes('/uma/home'));
     // Claude tries to act while the person signs in: refused, and no page gets a debugger attached.
     assert.equal((await client.callTool({ name: 'browser_tabs', arguments: { profile: 'Uma', action: 'list' } })).isError, true);
     assert.equal((await client.callTool({ name: 'cast_open', arguments: { profile: 'Uma' } })).isError, true);
