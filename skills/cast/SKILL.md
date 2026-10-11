@@ -38,7 +38,7 @@ Each window is the person's regular Chrome: it reopens their tabs from last time
 If a response contains `### Modal state` (e.g. a `confirm` dialog), other tools will fail until you call `browser_handle_dialog {profile, accept: true|false}`.
 
 ## Expired sessions — do not log in yourself
-If a site shows a login page instead of the app, stop working with that profile and ask the user to run `/cast:open <name>` and log in again there. If a tool says the user's window for that profile is still open, ask the user to finish and close it; after they say so, `cast_user_window_result {name}` shows what was saved. Never type passwords, never fill login forms, never call `cast_add` or `cast_open_for_user` on your own.
+If a site shows a login page instead of the app, stop working with that profile and ask the user to run `/cast:open <name>` and log in again there. While the user's window for that profile is open for signing in, do not act in it: sign-in pages refuse a browser Claude controls. Ask the user whether they are done; when they say so, call `cast_user_window_result {name}` and continue in the same window (they do not need to close it). Never type passwords, never fill login forms, never call `cast_add` or `cast_open_for_user` on your own.
 
 ## Blocked actions
 Claude Code may deny a `browser_*` call (a permission prompt the user declined, or auto mode). Stop and tell the user in plain words:
