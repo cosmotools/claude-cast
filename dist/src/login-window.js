@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import initSqlJs from 'sql.js';
-import { launchChrome } from './chrome.js';
+import { hasSession, launchChrome, runningChrome } from './chrome.js';
 import { ensurePrivateDir } from './paths.js';
 import { classifyHosts } from './sites.js';
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -11,29 +11,37 @@ export const INSTRUCTIONS_FILE = 'cast-login.html';
 /** Chrome stores times as microseconds since 1601-01-01. */
 const CHROME_EPOCH_OFFSET_US = 11_644_473_600_000_000;
 /**
- * Opens the profile in a plain Chrome for the human and returns at once. Chrome runs detached, so the
- * window outlives cast and the Claude session; what was visited is read later with readLogin.
+ * Opens the profile's Chrome for the human and returns at once. Chrome runs detached, so the window
+ * outlives cast and the Claude session; what was visited is read later with readLogin. When the
+ * profile's Chrome already runs with a DevTools port (the person's window, or one Claude attached to and
+ * detached from), the instruction page and sites open as new tabs there.
  *
- * Nothing drives this window: no Playwright and no DevTools port. Either one makes pages see
- * navigator.webdriver = true, and SSO bot checks (GoDaddy, Okta…) refuse to log in there.
- * The previous session's tabs come back.
+ * Nothing attaches to its pages while the person signs in: SSO bot checks (GoDaddy-federated Microsoft
+ * 365) refuse a browser that Playwright is attached to, even with navigator.webdriver = false. The window
+ * has the same DevTools port and flags as Claude's window, so Claude can attach to it once the person is
+ * done. The previous session's tabs come back.
  */
 export async function startLoginWindow(dir, opts) {
-    const test = process.env.CAST_TEST_HEADLESS === '1';
     // Inside the profile, not in /tmp: the session is restored later and the tab must still load.
     ensurePrivateDir(dir);
     const instructions = join(dir, INSTRUCTIONS_FILE);
     writeFileSync(instructions, instructionPage(opts.name, opts.sites ?? []));
     const startedAt = new Date(Date.now() - 1000);
-    const chrome = await launchChrome(dir, {
+    const instructionsUrl = pathToFileURL(instructions).href;
+    const sites = (opts.sites ?? []).map(siteUrl);
+    const running = await runningChrome(dir);
+    // A restored session already holds the tabs the person had: they are added to, not opened again.
+    const restoring = !running && hasSession(dir);
+    const chrome = running ?? await launchChrome(dir, {
         restore: true,
         look: opts.look,
         browser: opts.browser,
         detached: true,
-        // Tests play the human over a DevTools port; real user windows never get one.
-        debugPort: test && !!opts.onReady,
-        urls: [pathToFileURL(instructions).href, ...(opts.sites ?? []).map(siteUrl)],
+        debugPort: true,
+        urls: restoring ? [] : [instructionsUrl, ...sites],
     });
+    if ((running || restoring) && chrome.endpoint)
+        await addTabs(chrome.endpoint, instructionsUrl, sites, restoring);
     try {
         if (opts.onReady)
             await opts.onReady({ endpoint: chrome.endpoint, close: () => { chrome.close().catch(() => { }); } });
@@ -56,6 +64,47 @@ export async function openLoginWindow(dir, opts) {
     if (timedOut)
         await chrome.close();
     return { ...await readLogin(dir, startedAt), timedOut };
+}
+/** The browser's tabs, read over HTTP without attaching to any page. */
+async function pageTabs(endpoint) {
+    const targets = await (await fetch(`${endpoint}/json/list`)).json();
+    return targets.filter(t => t.type === 'page');
+}
+/** The tabs once Chrome has restored the session: the list is not empty and stops changing (up to 5 s). */
+async function restoredTabs(endpoint) {
+    const deadline = Date.now() + 5000;
+    let last = '';
+    for (;;) {
+        const tabs = await pageTabs(endpoint);
+        const ids = tabs.map(t => t.id).join();
+        if ((tabs.length && ids === last) || Date.now() > deadline)
+            return tabs;
+        last = ids;
+        await new Promise(r => setTimeout(r, 250));
+    }
+}
+/**
+ * Opens the instruction page and the sites not open yet (Teams the person left open is not opened a second
+ * time) in a window that has tabs already. Earlier instruction pages are closed after the new one opens, so
+ * the window is never left without a tab. Over HTTP: no page is attached while the person signs in.
+ */
+async function addTabs(endpoint, instructionsUrl, sites, restoring) {
+    const tabs = restoring ? await restoredTabs(endpoint) : await pageTabs(endpoint);
+    const open = new Set(tabs.map(t => httpHost(t.url)).filter(h => h));
+    // The instruction page last: the newest tab is the one in front.
+    for (const url of [...sites.filter(url => !open.has(httpHost(url))), instructionsUrl]) {
+        await fetch(`${endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+    }
+    // Compared by name: Chrome may spell the file URL differently (drive letter, escapes).
+    const earlier = tabs.filter(t => t.url.startsWith('file:') && t.url.endsWith(`/${INSTRUCTIONS_FILE}`));
+    for (const tab of earlier)
+        await fetch(`${endpoint}/json/close/${tab.id}`);
+    // Closing finishes after the reply; wait (up to 5 s) so the next call sees the window as it is.
+    const closing = new Set(earlier.map(t => t.id));
+    for (const end = Date.now() + 5000; closing.size && Date.now() < end; await new Promise(r => setTimeout(r, 100))) {
+        if (!(await pageTabs(endpoint)).some(t => closing.has(t.id)))
+            break;
+    }
 }
 /** "https://app.example.com/vendor?code=…#x" → "https://app.example.com/vendor" */
 export function pageUrl(url) {
@@ -129,9 +178,9 @@ h1{font-size:1.6rem}li{margin:.4rem 0}</style>
 <ol>
 <li>Open a new tab and log in everywhere ${esc(name)} needs: your app, email, SSO, chat…</li>
 <li>When asked about MFA or “Stay signed in”, choose to stay signed in.</li>
-<li><b>Close this window</b> when you are done, then tell Claude.</li>
+<li>When you are done, <b>tell Claude</b>. You can keep this window: Claude then works in it. Or close it.</li>
 </ol>
 ${known}
-<p>This is a regular Chrome: nothing is automated while you log in. cast never stores or types passwords; it only notes which sites you visited and the last page on each (no cookies).</p>
+<p>This is a regular Chrome: nothing is automated while you log in, and Claude does not act here until you say you are done. cast never stores or types passwords; it only notes which sites you visited and the last page on each (no cookies).</p>
 <p>You can leave Claude Code meanwhile: cast reads the visited sites once the window is closed.</p>`;
 }

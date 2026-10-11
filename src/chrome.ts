@@ -44,7 +44,8 @@ export interface WindowLook {
 }
 
 export interface Chrome {
-  process: ChildProcess;
+  /** Unset for a Chrome cast did not start in this process (see runningChrome). */
+  process?: ChildProcess;
   /** Resolves when Chrome is gone, e.g. the human closed its window. */
   exited: Promise<void>;
   /** "http://127.0.0.1:<port>" when started with debugPort. */
@@ -66,7 +67,7 @@ export async function launchChrome(dir: string, opts: LaunchOptions = {}): Promi
   const portFile = join(dir, 'DevToolsActivePort');
   rmSync(portFile, { force: true });
   if (opts.look?.color) applyColor(dir, opts.look.color);
-  const restore = opts.restore && existsSync(join(dir, 'Default', 'Sessions'));
+  const restore = opts.restore && hasSession(dir);
   if (restore) clearCrashedExit(dir);
   if (restore && opts.look) nameSessionWindows(dir, opts.look.title);
 
@@ -104,8 +105,8 @@ export async function launchChrome(dir: string, opts: LaunchOptions = {}): Promi
     exited,
     close: async () => {
       if (gone) return;
-      if (!await requestStop(child, chrome.endpoint)) forceStop(child);
-      const killer = setTimeout(() => forceStop(child), 10_000);
+      if (!await requestStop(child.pid, chrome.endpoint)) forceStop(child.pid);
+      const killer = setTimeout(() => forceStop(child.pid), 10_000);
       await exited;
       clearTimeout(killer);
     },
@@ -151,8 +152,10 @@ function readPortFile(file: string): string {
  * Node's kill() terminates the process at once, so Chrome is asked over the DevTools port when it has one,
  * else its windows get WM_CLOSE (taskkill without /F). False when the request could not be made.
  */
-async function requestStop(child: ChildProcess, endpoint?: string): Promise<boolean> {
-  if (process.platform !== 'win32') return child.kill('SIGINT');
+async function requestStop(pid: number | undefined, endpoint?: string): Promise<boolean> {
+  if (process.platform !== 'win32') {
+    try { return !!pid && process.kill(pid, 'SIGINT'); } catch { return false; }
+  }
   if (endpoint) {
     try {
       const { chromium } = await import('playwright-core');
@@ -163,13 +166,67 @@ async function requestStop(child: ChildProcess, endpoint?: string): Promise<bool
     } catch { /* ask the windows instead */ }
   }
   // Fails when Chrome has no window to close, e.g. headless.
-  return spawnSync('taskkill', ['/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true }).status === 0;
+  if (!pid) return false;
+  return spawnSync('taskkill', ['/PID', String(pid)], { stdio: 'ignore', windowsHide: true }).status === 0;
 }
 
 /** Last resort: may lose cookies and History not written yet. */
-function forceStop(child: ChildProcess): void {
-  if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore', windowsHide: true });
-  else child.kill('SIGKILL');
+function forceStop(pid: number | undefined): void {
+  if (!pid) return;
+  if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
+  else try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+}
+
+/** Whether the profile has a saved session for --restore-last-session to bring back. */
+export function hasSession(dir: string): boolean {
+  return existsSync(join(dir, 'Default', 'Sessions'));
+}
+
+/**
+ * The Chrome already running on a profile folder with a DevTools port, e.g. the user window opened by
+ * /cast:open, possibly in an earlier Claude session. Undefined when none runs, or it has no port that
+ * answers (a Chrome cast did not start, or one from an older cast). Nothing attaches to its pages here.
+ */
+export async function runningChrome(dir: string): Promise<Chrome | undefined> {
+  if (!isRunning(dir)) return undefined;
+  const port = readPortFile(join(dir, 'DevToolsActivePort')).split('\n')[0];
+  if (!port) return undefined;
+  const endpoint = `http://127.0.0.1:${port}`;
+  try {
+    const res = await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return undefined;
+  } catch {
+    return undefined;
+  }
+  const pid = runningPid(dir);
+  const exited = new Promise<void>(resolve => {
+    const timer = setInterval(() => { if (!isRunning(dir)) { clearInterval(timer); resolve(); } }, 1000);
+    timer.unref();
+  });
+  let gone = false;
+  exited.then(() => { gone = true; });
+  return {
+    exited,
+    endpoint,
+    close: async () => {
+      if (gone) return;
+      if (!await requestStop(pid, endpoint)) forceStop(pid);
+      const killer = setTimeout(() => forceStop(pid), 10_000);
+      await exited;
+      clearTimeout(killer);
+    },
+  };
+}
+
+/** The browser process of a running profile, from its SingletonLock; undefined on Windows (CDP Browser.close stops it there). */
+function runningPid(dir: string): number | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    const target = readlinkSync(join(dir, 'SingletonLock'));
+    return Number(target.slice(target.lastIndexOf('-') + 1)) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Environment problems, each in one sentence with what to do. */

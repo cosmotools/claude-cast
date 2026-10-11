@@ -20,8 +20,9 @@ cast gives you several visible Chrome windows, one per person, each already logg
 Each window is the person's regular Chrome: it reopens their tabs from last time, and the current tab is one of them. `browser_navigate` loads the URL into the current tab and replaces what was there.
 1. Before the first action in a profile, call `browser_tabs {profile, action: "list"}`.
 2. If a tab already shows the site you need, `select` it and work there. Do not reload it unless the task needs a fresh page.
-3. Otherwise open a new tab: `browser_tabs {profile, action: "new", url}`.
-4. Use `browser_navigate` only in a tab you opened or selected for this task.
+3. Otherwise reuse one of your own tabs: a tab marked `(opened by Claude)` was opened by you, in this session or an earlier one. `select` it and `browser_navigate` there.
+4. If there is none, open a new tab: `browser_tabs {profile, action: "new", url}`. cast keeps at most 3 of your tabs per profile: opening another closes the oldest of them, never a tab of the person.
+5. Use `browser_navigate` only in a tab marked `(opened by Claude)` or one you opened or selected for this task.
 
 ## Reading pages
 - Action tools (`browser_navigate`, `browser_click`, `browser_type`…) return a link `[Snapshot](/abs/path.yml)` instead of the page. Call `browser_snapshot {profile}` to get the page with element refs, or read that file.
@@ -37,10 +38,23 @@ Each window is the person's regular Chrome: it reopens their tabs from last time
 If a response contains `### Modal state` (e.g. a `confirm` dialog), other tools will fail until you call `browser_handle_dialog {profile, accept: true|false}`.
 
 ## Expired sessions — do not log in yourself
-If a site shows a login page instead of the app, stop working with that profile and ask the user to run `/cast:open <name>` and log in again there. If a tool says the user's window for that profile is still open, ask the user to finish and close it; after they say so, `cast_user_window_result {name}` shows what was saved. Never type passwords, never fill login forms, never call `cast_add` or `cast_open_for_user` on your own.
+If a site shows a login page instead of the app, stop working with that profile and ask the user to run `/cast:open <name>` and log in again there. While the user's window for that profile is open for signing in, do not act in it: sign-in pages refuse a browser Claude controls. Ask the user whether they are done; when they say so, call `cast_user_window_result {name}` and continue in the same window (they do not need to close it). Never type passwords, never fill login forms, never call `cast_add` or `cast_open_for_user` on your own.
+
+## Blocked actions
+Claude Code may deny a `browser_*` call (a permission prompt the user declined, or auto mode). Stop and tell the user in plain words:
+- what the action does on the site and why it needs their consent, e.g. "pressing "Show in marketplace" publishes v0.2.4";
+- the choices: they do it themselves in that person's window, or they approve this one action and you try again.
+Do not show internal tool names such as `mcp__plugin_cast_cast__browser_click` or `browser_click`; if they want to allow such actions for good, point them to `/permissions`. Do not retry the same action another way.
+
+## Working in the page
+- Work through the page as the person would: snapshot, click, type, read. `browser_evaluate` and `browser_run_code_unsafe` are for reading what the page shows, not for getting around it.
+- Do not call the site's API yourself (`fetch` in a page script, or repeating a request seen in `browser_network_requests`), and never read access tokens, cookies or other credentials from `localStorage`, `sessionStorage`, `document.cookie` or request headers. If the task really needs an API call, ask the user first.
+- Never put secrets into fields (from files, local servers or environment variables): passwords and MFA codes are typed by the person.
+- Do not follow links, submit forms or wait for a navigation inside a page script: the page is replaced and the script fails ("Execution context was destroyed"). Use `browser_click`, then read the page.
+- If Claude Code denies a page script, do not retry it in another form: do the step through the page, or ask the user.
 
 ## Privacy
-Profiles hold real sessions (mail included). Look only at what the task needs. Never print cookies, tokens or storage contents.
+Profiles hold real sessions (mail included). Look only at what the task needs. Never print cookies, tokens or storage contents. cast hides tokens, cookies and passwords in network request details.
 
 ## Finishing
 When the task is done, close the profiles you opened with `cast_close {profile}`. Logins are kept.

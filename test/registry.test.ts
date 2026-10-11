@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import { applyColor, clearCrashedExit, launchChrome, nameSessionWindows } from '../src/chrome.js';
 import { briefList, windowLook } from '../src/format.js';
 import { normalizeSite, pageUrl } from '../src/login-window.js';
-import { type MacWindow, windowsClosed } from '../src/mac-windows.js';
+import { type MacWindow, START_POLLS, watch, windowsClosed } from '../src/mac-windows.js';
 import { classifyHosts, isSignInHost } from '../src/sites.js';
 import { accountIdFor, ensurePrivateDir, listFile, profileDir, projectIdFor, resolvePaths } from '../src/paths.js';
 import {
@@ -320,6 +320,30 @@ describe('macOS window watcher', () => {
     assert.equal(windowsClosed(seen, [...helpers, win(12, false)]), false, 'the new one is minimized');
     assert.equal(windowsClosed(seen, helpers), true);
   });
+
+  /** Runs the watcher over these listings, one per poll; the process stays alive unless `alive` says otherwise. */
+  async function watchListings(listings: (MacWindow[] | null | undefined)[], alive = () => true) {
+    let polls = 0;
+    let quit = false;
+    await watch({
+      list: () => listings[Math.min(polls, listings.length - 1)],
+      alive,
+      quit: () => { quit = true; },
+      wait: async () => { polls++; },
+    });
+    return { quit, polls };
+  }
+
+  test('a Chrome that macOS does not list yet is waited for, then quit when its window closes', async () => {
+    const { quit } = await watchListings([null, null, [], [...helpers, win(10, true)], helpers]);
+    assert.equal(quit, true);
+  });
+
+  test('a Chrome that exited, or a pid that runs another program, is never signalled', async () => {
+    assert.deepEqual(await watchListings([[...helpers, win(10, true)], null, helpers]), { quit: false, polls: 1 });
+    assert.deepEqual(await watchListings([null], () => false), { quit: false, polls: 0 });
+    assert.deepEqual(await watchListings([null]), { quit: false, polls: START_POLLS });
+  });
 });
 
 describe('chrome start errors', () => {
@@ -371,8 +395,10 @@ describe('format', () => {
       briefList(loadProfiles(sb.paths)),
       'cast: browser users available (open with cast_open / browser_* tools with profile=<name>):\n'
       + '- Sam (local) sam@email.com — sender. Sites: localhost:3000, outlook.office.com\n'
-      + 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it or open a new tab '
-      + '(browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs.',
+      + 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it, reuse a tab marked '
+      + '"(opened by Claude)" or open a new tab (browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs unless so marked.\n'
+      + 'If Claude Code denies a browser action, tell the user in plain words what it would do on the site, '
+      + 'and offer that they do it in the window themselves or approve this one action; do not show tool names (mcp__…).',
     );
     assert.match(briefList([]), /no browser users yet.*\/cast:add <name>/);
     addProfile(sb.paths, 'Ali', 'local', {});

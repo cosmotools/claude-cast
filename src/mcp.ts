@@ -7,6 +7,7 @@ import { type Browser, BrowserError, pickBrowser } from './browsers.js';
 import { windowLook } from './format.js';
 import { Gateway, type GatewayProfile, PROFILE_PARAM } from './gateway.js';
 import { type LoginResult, normalizeSite, startLoginWindow } from './login-window.js';
+import { isRunning } from './chrome.js';
 import { finishClosedLogins, finishLogin, lastLogin, loginPending } from './logins.js';
 import { type CastPaths, type Scope, outputDir, resolvePaths } from './paths.js';
 import { VERSION } from './version.js';
@@ -25,7 +26,7 @@ const CAST_TOOLS: Tool[] = [
   },
   {
     name: 'cast_open',
-    description: 'Open the visible Chrome of a profile, optionally with a URL in a new tab (the person\'s own tabs stay as they are). browser_* tools also open the profile automatically.',
+    description: 'Open the visible Chrome of a profile, optionally with a URL in a new tab (the person\'s own tabs stay as they are; at most 3 tabs opened by Claude are kept, the oldest is closed). browser_* tools also open the profile automatically.',
     annotations: { title: 'Open a profile', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -35,13 +36,13 @@ const CAST_TOOLS: Tool[] = [
   },
   {
     name: 'cast_close',
-    description: 'Close the Chrome of a profile. Logins are kept in the profile. Close profiles when the task is done.',
+    description: 'Close the Chrome of a profile. Logins are kept in the profile. Close profiles when the task is done. A window the user opened with /cast:open stays open: Claude only lets go of it.',
     annotations: { title: 'Close a profile', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: 'object', properties: { profile: PROFILE_PARAM }, required: ['profile'] },
   },
   {
     name: 'cast_add',
-    description: `Create a profile and open a clean Chrome for the human to log in. Returns at once; when the user says they are done, call cast_user_window_result. ${HUMAN_ONLY}`,
+    description: `Create a profile and open a clean Chrome for the human to log in. Returns at once; when the user says they are done (the window may stay open), call cast_user_window_result, then Claude can work in the same window. ${HUMAN_ONLY}`,
     annotations: { title: 'Add a profile and open it for login', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     inputSchema: {
       type: 'object',
@@ -56,13 +57,13 @@ const CAST_TOOLS: Tool[] = [
   },
   {
     name: 'cast_open_for_user',
-    description: `Open an existing profile's Chrome for the human, without Claude's control: to log in again, add sites or work by hand. Returns at once; when the user says they are done, call cast_user_window_result. ${HUMAN_ONLY}`,
+    description: `Open an existing profile's Chrome for the human, without Claude's control: to log in again, add sites or work by hand. Returns at once; when the user says they are done (the window may stay open), call cast_user_window_result, then Claude can work in the same window. To open a profile for Claude to work in, use cast_open instead. ${HUMAN_ONLY}`,
     annotations: { title: 'Open a profile for the user', readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     inputSchema: { type: 'object', properties: { name: PROFILE_PARAM }, required: ['name'] },
   },
   {
     name: 'cast_user_window_result',
-    description: 'After /cast:add or /cast:open: whether the user window is closed yet and, if so, the sites saved from it and the last page the user saw on each.',
+    description: 'After /cast:add or /cast:open, once the user says they are done: saves and returns the sites visited in the user window and the last page the user saw on each. The window may stay open; Claude can work in it afterwards. Takes about 10 s while the window is open.',
     annotations: { title: 'Get what the user window saved', readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     inputSchema: { type: 'object', properties: { name: PROFILE_PARAM }, required: ['name'] },
   },
@@ -135,17 +136,17 @@ async function castTool(paths: CastPaths, gateway: Gateway, tool: string, args: 
       const p = usable(paths, str(args, 'profile'));
       const gp = gatewayProfile(paths, p);
       // Playwright MCP starts Chrome lazily, so make a call that shows the window. A URL goes to a
-      // new tab: the current one is a tab the person left open, and navigating would replace it.
-      // An empty new tab (a new profile's only tab) is used instead of opening another one next to it.
+      // new tab (or an empty one): the current one is a tab the person left open.
       const url = optStr(args, 'url');
-      const tabs = await gateway.call(gp, 'browser_tabs', { action: 'list' });
-      let result = tabs;
-      if (url && blankCurrentTab(tabs)) result = await gateway.call(gp, 'browser_navigate', { url });
-      else if (url) result = await gateway.call(gp, 'browser_tabs', { action: 'new', url });
+      const result = url ? await gateway.openTab(gp, url) : await gateway.call(gp, 'browser_tabs', { action: 'list' });
       return { ...result, content: [{ type: 'text', text: `Profile "${p.name}" is open.` }, ...result.content] };
     }
     case 'cast_close': {
       const name = str(args, 'profile');
+      if (gateway.isJoined(name)) {
+        await gateway.close(name);
+        return ok(`Let go of "${name}": the window was opened by the user and stays open for them. Logins are kept.`);
+      }
       return ok(await gateway.close(name) ? `Closed "${name}".` : `"${name}" was not open.`);
     }
     case 'cast_add': {
@@ -177,10 +178,9 @@ async function castTool(paths: CastPaths, gateway: Gateway, tool: string, args: 
     }
     case 'cast_user_window_result': {
       const name = requireReady(paths, str(args, 'name')).name;
-      const p = await finishLogin(paths, name);
-      if (!p) return ok(`The user window for "${name}" is still open. Ask the user to close it when they are done, then call cast_user_window_result again.`);
+      const p = (await finishLogin(paths, name, true))!;
       if (!p.lastLoginAt || !p.loginStartedAt) return ok(`No user window was opened for "${p.name}". The user can run /cast:open ${p.name}.`);
-      return ok(loginReport(p, await lastLogin(p)));
+      return ok(loginReport(p, await lastLogin(p), isRunning(p.dir)));
     }
     case 'cast_set_sites': {
       const raw = args.sites;
@@ -217,18 +217,24 @@ async function castTool(paths: CastPaths, gateway: Gateway, tool: string, args: 
   }
 }
 
-/** A browser_* or cast_open target: ready, and not in the middle of a login. */
+/**
+ * A browser_* or cast_open target: ready, and not in the middle of a login. Claude must not attach while
+ * the person signs in: SSO bot checks refuse a browser Playwright is attached to.
+ */
 function usable(paths: CastPaths, name: string): Profile {
   const p = ensureColor(paths, name);
   if (loginPending(p)) {
-    throw new RegistryError(`The user window for "${p.name}" is still open. Ask the user to finish and close it, then try again.`);
+    throw new RegistryError(`The user window for "${p.name}" is open, and the user may be signing in there: Claude does not act in it until they are done, `
+      + `because sign-in pages refuse a browser Claude controls. Ask the user whether they have finished; when they say so, `
+      + `call cast_user_window_result {name: "${p.name}"} and continue in the same window. They do not need to close it.`);
   }
   return p;
 }
 
 /** Opens the window and returns at once: the human may take long, and the window outlives this session. */
 async function loginWindow(paths: CastPaths, gateway: Gateway, p: Profile): Promise<void> {
-  // The Chrome profile can be used by one browser at a time.
+  // Nothing may be attached while the person signs in. cast's own Chrome is stopped, so the user window
+  // runs detached and outlives this session; a window the person opened before keeps running.
   await gateway.close(p.name);
   const browser = profileBrowser(paths, p);
   const { startedAt, chrome } = await startLoginWindow(p.dir, { name: p.name, sites: p.sites, look: windowLook(p, 'your window'), browser });
@@ -240,15 +246,18 @@ async function loginWindow(paths: CastPaths, gateway: Gateway, p: Profile): Prom
 function loginOpened(p: Profile): string {
   return [
     `The user window for "${p.name}" is open. This call does not wait for it.`,
-    'Tell the user: log in everywhere this person needs, choose "Stay signed in" on MFA prompts, close the window when done and say so here. '
+    'Tell the user: log in everywhere this person needs, choose "Stay signed in" on MFA prompts, and say so here when done; '
+      + 'they can keep the window open (you then work in it) or close it. '
       + 'They may also leave this Claude Code session: cast saves the visited sites when the window closes.',
-    `When the user says they are done, call cast_user_window_result {name: "${p.name}"}.`,
+    `When the user says they are done, call cast_user_window_result {name: "${p.name}"}. Until then do not act in this profile.`,
   ].join('\n');
 }
 
-function loginReport(p: Profile, r: LoginResult): string {
+function loginReport(p: Profile, r: LoginResult, open: boolean): string {
   const lines = [
-    `The user window for "${p.name}" is closed. cast saved the sites the user landed on.`,
+    open
+      ? `The user is done in the window for "${p.name}"; it stays open and Claude can work in it now (browser_* tools). cast saved the sites the user landed on.`
+      : `The user window for "${p.name}" is closed. cast saved the sites the user landed on.`,
     `Sites from this login: ${r.sites.join(', ') || '(none)'}`,
     `Saved sites now: ${p.sites.join(', ') || '(none)'}`,
     `Sign-in pages and redirects (left out; Claude never logs in itself): ${r.signIn.join(', ') || '(none)'}`,
@@ -302,12 +311,6 @@ function rawStr(args: Args, key: string): string | undefined {
 function optStr(args: Args, key: string): string | undefined {
   const v = args[key];
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
-}
-
-/** browser_tabs "list" shows the current tab as an empty new tab page or about:blank. */
-function blankCurrentTab(tabs: CallToolResult): boolean {
-  const text = tabs.content.map(c => (c.type === 'text' ? c.text : '')).join('\n');
-  return /^- \d+: \(current\) \[[^\]]*\]\((about:blank|(chrome|edge):\/\/(newtab|new-tab-page)\/?)\)$/m.test(text);
 }
 
 function ok(text: string): CallToolResult {

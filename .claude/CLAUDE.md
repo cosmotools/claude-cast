@@ -9,7 +9,7 @@ Developers test apps where several people interact (Sam sends a chat message, El
 Core ideas:
 - **A profile is a person, not a site.** One Chrome profile holds all of that person's logins (app, SSO, mail).
 - **A human logs in, Claude never does.** `/cast:add` and `/cast:open` open a plain Chrome for the human; when a session expires Claude asks for `/cast:open <name>`.
-- **Two modes of one profile:** the user window (plain Chrome, no control port, so SSO bot checks pass) and Claude's window (the same Chrome with a DevTools port, Playwright MCP attached).
+- **One Chrome per profile, always with a DevTools port.** While the person signs in (`/cast:add`, `/cast:open`), nothing is attached to its pages, so SSO bot checks pass; when they say they are done, Playwright MCP attaches to the same window.
 - **Claude knows who is who:** a `SessionStart` hook lists profiles (name, email, role, sites) in every session.
 - Scopes like Claude's own: `local` (this project), `project` (team slot in `.claude/claude-cast.yaml`, no credentials), `user` (all projects).
 - **Uninstall removes everything except snap profiles.** All cast files live in `${CLAUDE_PLUGIN_DATA}`, which `/plugin uninstall` deletes, so profiles belong to one Claude Code account. A snap browser's profiles must stay in `~/snap/`.
@@ -37,7 +37,7 @@ Status: Linux, macOS and Windows (Windows tested in CI only). Installed as `/plu
 
 The reasons are in "Why it is built this way" in `CONTRIBUTING.md`.
 
-- The user window (`/cast:add`, `/cast:open`) must have no DevTools port: a port makes SSO bot checks refuse the login.
+- Nothing may attach to a profile's pages while the person signs in (`/cast:add`, `/cast:open` until `cast_user_window_result` or the window closes): GoDaddy-federated Microsoft 365 refuses a browser Playwright is attached to, even with `navigator.webdriver = false`. Open tabs there over `/json/new`, not through Playwright.
 - Stop Chrome through `Chrome.close()` (`SIGINT`; on Windows CDP `Browser.close` or `taskkill` without `/F`), never `SIGTERM` or a forced kill: they lose cookies and history not flushed yet.
 - Closing a profile: stop Chrome first, then disconnect Playwright, or the saved session loses its tabs.
 - After Playwright attaches, wait for the tab list to settle before selecting a tab (session restore races).

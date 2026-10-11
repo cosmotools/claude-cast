@@ -3,8 +3,12 @@ import type { WindowLook } from './chrome.js';
 import type { Profile } from './registry.js';
 
 /** Each window restores the person's tabs, so Claude must not load a site over the current one. */
-const TABS_RULE = 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it or open a new tab '
-  + '(browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs.';
+const TABS_RULE = 'Each window reopens the person\'s own tabs. To open a site there, select a tab that already shows it, reuse a tab marked '
+  + '"(opened by Claude)" or open a new tab (browser_tabs "new" with url); browser_navigate replaces the current tab, which is theirs unless so marked.';
+
+/** A denied call is explained to the person by what it does, not by Claude Code's internal tool name. */
+const BLOCKED_RULE = 'If Claude Code denies a browser action, tell the user in plain words what it would do on the site, '
+  + 'and offer that they do it in the window themselves or approve this one action; do not show tool names (mcp__…).';
 
 /** Compact block for the SessionStart hook; a hint on how to add people when there are none. */
 export function briefList(profiles: Profile[]): string {
@@ -21,7 +25,7 @@ export function briefList(profiles: Profile[]): string {
     if (p.browser && p.browser !== 'chrome') line += ` Browser: ${browserName(p.browser)}.`;
     return line;
   });
-  return ['cast: browser users available (open with cast_open / browser_* tools with profile=<name>):', ...lines, TABS_RULE].join('\n');
+  return ['cast: browser users available (open with cast_open / browser_* tools with profile=<name>):', ...lines, TABS_RULE, BLOCKED_RULE].join('\n');
 }
 
 /** "Sam (vendor, Acme org) · your window · cast": the window title people see in the title bar and taskbar. */

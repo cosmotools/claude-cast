@@ -1,8 +1,10 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { launchChrome } from './chrome.js';
+import { launchChrome, runningChrome } from './chrome.js';
+import { hideCredentials } from './credentials.js';
 import { DialogGuard } from './dialogs.js';
 import { INSTRUCTIONS_FILE } from './login-window.js';
 import { ensurePrivateDir } from './paths.js';
@@ -12,13 +14,23 @@ const require = createRequire(import.meta.url);
 const PLAYWRIGHT_MCP_CLI = join(dirname(require.resolve('@playwright/mcp/package.json')), 'cli.js');
 /** Tools cast replaces (browser_close → cast_close) or never exposes. */
 const HIDDEN_TOOLS = new Set(['browser_close', 'browser_install']);
+/** Tabs Claude may keep open per profile: opening another one closes the oldest of them, never a tab of the person. */
+export const CLAUDE_TAB_LIMIT = 3;
+/**
+ * URLs of the tabs Claude opened, oldest first, in the Chrome profile folder. Chrome restores the tabs
+ * but not who opened them, so without this record they would all look like the person's after a restart.
+ */
+const CLAUDE_TABS_FILE = 'cast-claude-tabs.json';
+const CLAUDE_TAB = '(opened by Claude)';
 export const PROFILE_PARAM = { type: 'string', description: 'cast profile name, see cast_list' };
 export class GatewayError extends Error {
 }
 /**
  * One regular Chrome plus one @playwright/mcp child per open profile; browser_* calls are routed by
  * profile name. cast starts Chrome itself (restoring the previous tabs) and Playwright MCP attaches
- * to it over the DevTools port, so the window behaves like the person's normal Chrome.
+ * to it over the DevTools port, so the window behaves like the person's normal Chrome. A window the
+ * person opened with /cast:open runs with a DevTools port too: cast attaches to it instead of starting
+ * another Chrome, and only detaches from it when closing.
  */
 export class Gateway {
     children = new Map();
@@ -27,6 +39,10 @@ export class Gateway {
     isOpen(name) {
         const child = this.children.get(name.toLowerCase());
         return !!child && !child.exited;
+    }
+    /** Whether cast attached to a window the person opened, which cast_close leaves open. */
+    isJoined(name) {
+        return !!this.children.get(name.toLowerCase())?.joined;
     }
     openNames() {
         return [...this.children.values()].filter(c => !c.exited).map(c => c.profile.name);
@@ -50,13 +66,15 @@ export class Gateway {
     }
     async start(profile) {
         ensurePrivateDir(profile.outputDir);
-        const chrome = await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
+        const running = await runningChrome(profile.dir);
+        const chrome = running ?? await launchChrome(profile.dir, { restore: true, debugPort: true, look: profile.look, browser: profile.browser });
         const client = new Client({ name: 'cast', version: VERSION });
-        const child = { profile, chrome, client };
+        const child = { profile, chrome, client, claudeTabs: [], joined: !!running };
         const transport = spawnChild(['--cdp-endpoint', chrome.endpoint, '--output-dir', profile.outputDir], profile.outputDir);
         transport.onclose = () => {
             child.exited ??= 'the Playwright MCP process exited';
-            chrome.close().catch(() => { });
+            if (!child.joined)
+                chrome.close().catch(() => { });
         };
         chrome.exited.then(() => {
             // Usually the human closed the window; the next call opens it again.
@@ -68,9 +86,13 @@ export class Gateway {
         try {
             await client.connect(transport);
             await settleTabs(client);
+            child.claudeTabs = await restoreClaudeTabs(chrome.endpoint, profile.dir).catch(() => []);
         }
         catch (e) {
-            await chrome.close();
+            if (child.joined)
+                await client.close().catch(() => { });
+            else
+                await chrome.close();
             throw e;
         }
         finally {
@@ -87,6 +109,13 @@ export class Gateway {
         this.children.delete(key);
         const wasOpen = !child.exited;
         child.exited ??= 'closed by cast';
+        if (child.joined) {
+            // The person's window: detaching leaves Chrome and every tab as they are.
+            if (wasOpen)
+                await saveClaudeTabs(child).catch(() => { });
+            await child.client.close().catch(() => { });
+            return wasOpen;
+        }
         // An open dialog keeps Chrome from closing on Windows (Browser.close does not finish, and the forced
         // stop loses the session and recent cookies): cancel it first. "No dialog" errors are ignored.
         if (wasOpen) {
@@ -94,6 +123,8 @@ export class Gateway {
                 child.client.callTool({ name: 'browser_handle_dialog', arguments: { accept: false } }).catch(() => { }),
                 new Promise(r => setTimeout(r, 3000)),
             ]);
+            // The person may have closed or changed Claude's tabs since the last call.
+            await saveClaudeTabs(child).catch(() => { });
         }
         // Chrome first: on disconnect Playwright closes the tabs it opened, and the saved session would be empty.
         await child.chrome.close();
@@ -119,14 +150,21 @@ export class Gateway {
         this.tools.catch(() => { this.tools = undefined; });
         return this.tools;
     }
-    /** Opens the profile if needed and forwards the call; the child's answer is returned as is. */
+    /**
+     * Opens the profile if needed and forwards the call. The answer is the child's, with the tabs Claude
+     * opened marked in tab lists. A new tab first closes the oldest of Claude's tabs when there are too many.
+     */
     async call(profile, tool, args) {
         if (HIDDEN_TOOLS.has(tool))
             throw new GatewayError(`${tool} is not available through cast; use cast_close.`);
         const child = await this.child(profile);
+        const newTab = tool === 'browser_tabs' && args.action === 'new';
         try {
+            const before = newTab ? await makeRoomForTab(child).catch(() => undefined) : undefined;
             const result = await child.client.callTool({ name: tool, arguments: args });
-            return absoluteLinks(result, profile.outputDir);
+            const tabs = await saveClaudeTabs(child, before).catch(() => undefined);
+            const answer = absoluteLinks(tabs ? markClaudeTabs(result, child, tabs) : result, profile.outputDir);
+            return NETWORK_TOOLS.has(tool) ? withoutCredentials(answer) : answer;
         }
         catch (e) {
             if (child.exited) {
@@ -135,6 +173,113 @@ export class Gateway {
             throw e;
         }
     }
+    /**
+     * Opens a URL for Claude without replacing the person's tab: in a new tab, or in the current one when
+     * it is an empty new tab page (a new profile's only tab), which then counts as Claude's.
+     */
+    async openTab(profile, url) {
+        const tabs = await this.call(profile, 'browser_tabs', { action: 'list' });
+        if (!blankCurrentTab(tabs))
+            return this.call(profile, 'browser_tabs', { action: 'new', url });
+        const child = await this.child(profile);
+        const blank = (await pageTargets(child.chrome.endpoint)).filter(t => BLANK_TAB.test(t.url));
+        if (blank.length === 1 && !child.claudeTabs.includes(blank[0].id))
+            child.claudeTabs.push(blank[0].id);
+        return this.call(profile, 'browser_navigate', { url });
+    }
+}
+async function pageTargets(endpoint) {
+    const res = await fetch(`${endpoint}/json/list`);
+    return (await res.json()).filter(t => t.type === 'page');
+}
+/**
+ * Forgets Claude's tabs that are gone and records the URLs of the others for the next start. A tab
+ * that appeared since `before` (the tabs before browser_tabs "new") is Claude's. Returns all tabs.
+ */
+async function saveClaudeTabs(child, before) {
+    const tabs = await pageTargets(child.chrome.endpoint);
+    const added = before ? tabs.filter(t => !before.some(b => b.id === t.id)) : [];
+    if (added.length === 1)
+        child.claudeTabs.push(added[0].id);
+    child.claudeTabs = child.claudeTabs.filter(id => tabs.some(t => t.id === id));
+    const record = JSON.stringify(child.claudeTabs.map(id => tabs.find(t => t.id === id).url));
+    if (record !== child.savedTabs) {
+        writeFileSync(join(child.profile.dir, CLAUDE_TABS_FILE), record);
+        child.savedTabs = record;
+    }
+    return tabs;
+}
+/** The restored tabs that Claude opened in an earlier session, oldest first. */
+async function restoreClaudeTabs(endpoint, dir) {
+    let recorded;
+    try {
+        recorded = JSON.parse(readFileSync(join(dir, CLAUDE_TABS_FILE), 'utf8'));
+    }
+    catch {
+        return [];
+    }
+    if (!Array.isArray(recorded) || !recorded.length)
+        return [];
+    const tabs = await pageTargets(endpoint);
+    const order = matchClaudeTabs(recorded.filter((u) => typeof u === 'string'), tabs.map(t => t.url));
+    return tabs.map((t, i) => [t.id, order[i]]).filter(([, n]) => n).sort((a, b) => a[1] - b[1]).map(([id]) => id);
+}
+/**
+ * Which restored tabs are the ones Claude opened (`recorded`, oldest first): for each restored tab, its
+ * place in `recorded` counting from 1, or 0 for the person's. A URL open in more tabs than Claude had
+ * open with it may be the person's too, and the tabs cannot be told apart: none of them counts as Claude's.
+ */
+export function matchClaudeTabs(recorded, restored) {
+    const count = (list, url) => list.filter(u => u === url).length;
+    const order = restored.map(() => 0);
+    recorded.forEach((url, i) => {
+        if (count(restored, url) > count(recorded, url))
+            return;
+        const j = restored.findIndex((u, k) => u === url && !order[k]);
+        if (j >= 0)
+            order[j] = i + 1;
+    });
+    return order;
+}
+/** Closes the oldest of Claude's tabs until another one fits under CLAUDE_TAB_LIMIT; returns the tabs left. */
+async function makeRoomForTab(child) {
+    const endpoint = child.chrome.endpoint;
+    let tabs = await pageTargets(endpoint);
+    child.claudeTabs = child.claudeTabs.filter(id => tabs.some(t => t.id === id));
+    while (child.claudeTabs.length >= CLAUDE_TAB_LIMIT) {
+        const oldest = child.claudeTabs.shift();
+        await fetch(`${endpoint}/json/close/${oldest}`);
+        // Wait until Chrome no longer lists it, so Playwright has seen the page close too.
+        for (let i = 0; i < 20 && tabs.some(t => t.id === oldest); i++) {
+            await new Promise(r => setTimeout(r, 50));
+            tabs = await pageTargets(endpoint);
+        }
+    }
+    return tabs;
+}
+/**
+ * Adds CLAUDE_TAB to Claude's tabs in tab lists ("- 1: (current) [title](url)"). Lines are matched to
+ * tabs by URL: a URL that a tab of Claude and a tab of the person both show is not marked.
+ */
+function markClaudeTabs(result, child, tabs) {
+    if (!child.claudeTabs.length || !Array.isArray(result.content))
+        return result;
+    const claude = (url) => {
+        const all = tabs.filter(t => t.url === url);
+        return all.length > 0 && all.every(t => child.claudeTabs.includes(t.id));
+    };
+    return {
+        ...result,
+        content: result.content.map(c => c.type !== 'text' ? c : {
+            ...c,
+            text: c.text.replace(/^(- \d+:(?: \(current\))?) (\[.*\]\((.*)\)(?: \[crashed\])?)$/gm, (m, head, tab, url) => claude(url) ? `${head} ${CLAUDE_TAB} ${tab}` : m),
+        }),
+    };
+}
+const BLANK_TAB = /^(about:blank|(chrome|edge):\/\/(newtab|new-tab-page)\/?)$/;
+/** browser_tabs "list" shows the current tab as an empty new tab page or about:blank. */
+function blankCurrentTab(tabs) {
+    return /^- \d+: \(current\)(?: \(opened by Claude\))? \[[^\]]*\]\((about:blank|(chrome|edge):\/\/(newtab|new-tab-page)\/?)\)$/m.test(resultText(tabs));
 }
 /** Index of the one visible page, the tab in front of the window, or -1. Pages come in the order of browser_tabs. */
 const VISIBLE_TAB = 'async (page) => { const states = await Promise.all(page.context().pages()'
@@ -179,20 +324,51 @@ function spawnChild(extraArgs, cwd) {
 }
 /** The current tab is usually one the person left open: Chrome restores their tabs. */
 const NAVIGATE_NOTE = ' In cast the current tab is usually one of the person\'s own tabs, and this replaces it. '
-    + 'To open a site, select a tab that already shows it (browser_tabs "select") or open a new one (browser_tabs "new" with url); '
-    + 'navigate only in a tab you opened or selected for this task.';
+    + 'To open a site, select a tab that already shows it or a tab marked "(opened by Claude)" (browser_tabs "select"), or open a new one (browser_tabs "new" with url); '
+    + 'navigate only in a tab marked "(opened by Claude)" or one you opened or selected for this task.';
+/** Page scripts run in the person's session: they read the page, they do not get around it. */
+const PAGE_SCRIPT_NOTE = ' In cast this runs in the person\'s own logged-in session. Use it to read what the page shows, not to get around the page: '
+    + 'do not call the site\'s API, read tokens, cookies or storage, or put secrets into fields; click and type instead, and ask the user before calling an API directly. '
+    + 'Do not follow links or submit forms inside it (the page is replaced and the script fails): browser_click first, then read.';
+const NETWORK_NOTE = ' cast hides tokens, cookies and passwords in the output; do not use requests to call the site\'s API yourself.';
+const NOTES = {
+    browser_navigate: NAVIGATE_NOTE,
+    browser_evaluate: PAGE_SCRIPT_NOTE,
+    browser_run_code_unsafe: PAGE_SCRIPT_NOTE,
+    browser_network_request: NETWORK_NOTE,
+    browser_network_requests: NETWORK_NOTE,
+};
 function withProfileParam(tool) {
     const schema = tool.inputSchema;
     const required = (schema.required ?? []).filter(r => r !== 'profile');
     return {
         ...tool,
-        ...(tool.name === 'browser_navigate' ? { description: (tool.description ?? '') + NAVIGATE_NOTE } : {}),
+        ...(NOTES[tool.name] ? { description: (tool.description ?? '') + NOTES[tool.name] } : {}),
         inputSchema: {
             ...schema,
             properties: { profile: PROFILE_PARAM, ...(schema.properties ?? {}) },
             required: ['profile', ...required],
         },
     };
+}
+/** Tools that print request headers and bodies, where tokens, cookies and passwords show up. */
+const NETWORK_TOOLS = new Set(['browser_network_request', 'browser_network_requests']);
+/** Hides credentials in a network tool's answer and in the text files it saved (`filename`). */
+function withoutCredentials(result) {
+    if (!Array.isArray(result.content))
+        return result;
+    for (const c of result.content) {
+        if (c.type !== 'text')
+            continue;
+        for (const [, file] of c.text.matchAll(/\]\(([^)\s]+)\)/g)) {
+            if (!isAbsolute(file) || !existsSync(file))
+                continue;
+            const data = readFileSync(file);
+            if (!data.includes(0))
+                writeFileSync(file, hideCredentials(data.toString('utf8')));
+        }
+    }
+    return { ...result, content: result.content.map(c => (c.type === 'text' ? { ...c, text: hideCredentials(c.text) } : c)) };
 }
 /**
  * Action tools answer with "[Snapshot](page-….yml)" relative to the child's cwd; make such links
