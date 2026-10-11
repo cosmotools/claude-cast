@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 — 2026-10-11
 
 ### Changed
 - One window per profile. The window `/cast:add` and `/cast:open` open for you is the one Claude works in: say you are done and Claude continues in it, without your closing it. Claude does not act in it while you sign in, and `cast_close` leaves a window you opened open. It now has a DevTools port like Claude's window (see SECURITY.md), with nothing attached to its pages until you are done: that, not the port, is what made GoDaddy-federated Microsoft 365 refuse the login. `/cast:open` on a profile whose window is open adds its tabs there instead of failing.
