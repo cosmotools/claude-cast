@@ -1,3 +1,5 @@
+import { statSync } from 'node:fs';
+import { join } from 'node:path';
 import { isRunning } from './chrome.js';
 import { readLogin } from './login-window.js';
 import { findProfile, loadProfiles, updateProfile } from './registry.js';
@@ -9,8 +11,11 @@ import { findProfile, loadProfiles, updateProfile } from './registry.js';
 export function loginPending(p) {
     return !!p.loginStartedAt && !(p.lastLoginAt && p.lastLoginAt >= p.loginStartedAt);
 }
-/** Chrome writes visits to History in batches every 10 s. */
-const HISTORY_COMMIT_MS = 11_000;
+/**
+ * Chrome writes visits to History about 10 s after the first unsaved one, all at once. Waiting for that
+ * write is enough; when nothing is waiting to be saved, no write comes, and the wait ends here.
+ */
+const HISTORY_COMMIT_MAX_MS = 15_000;
 /**
  * Saves the sites visited in a finished user window (without asking: /cast:edit changes them).
  * Returns undefined while the window is still open, unless `open` is set: the person said they are done
@@ -23,7 +28,7 @@ export async function finishLogin(paths, name, open = false) {
     if (isRunning(p.dir)) {
         if (!open)
             return undefined;
-        await new Promise(r => setTimeout(r, HISTORY_COMMIT_MS));
+        await historyWritten(p.dir);
     }
     const r = await readLogin(p.dir, new Date(p.loginStartedAt));
     const added = r.sites.filter(s => !p.sites.includes(s));
@@ -39,4 +44,16 @@ export async function finishClosedLogins(paths) {
 /** What the human visited in the last finished user window. */
 export function lastLogin(p) {
     return readLogin(p.dir, new Date(p.loginStartedAt), new Date(p.lastLoginAt));
+}
+/** Waits until Chrome writes History after now, or HISTORY_COMMIT_MAX_MS. */
+async function historyWritten(dir) {
+    const mtime = () => { try {
+        return statSync(join(dir, 'Default', 'History')).mtimeMs;
+    }
+    catch {
+        return 0;
+    } };
+    const before = mtime();
+    for (const end = Date.now() + HISTORY_COMMIT_MAX_MS; Date.now() < end && mtime() === before;)
+        await new Promise(r => setTimeout(r, 250));
 }
