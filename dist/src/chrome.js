@@ -32,7 +32,7 @@ export async function launchChrome(dir, opts = {}) {
     rmSync(portFile, { force: true });
     if (opts.look?.color)
         applyColor(dir, opts.look.color);
-    const restore = opts.restore && existsSync(join(dir, 'Default', 'Sessions'));
+    const restore = opts.restore && hasSession(dir);
     if (restore)
         clearCrashedExit(dir);
     if (restore && opts.look)
@@ -160,6 +160,10 @@ function forceStop(pid) {
             process.kill(pid, 'SIGKILL');
         }
         catch { /* gone */ }
+}
+/** Whether the profile has a saved session for --restore-last-session to bring back. */
+export function hasSession(dir) {
+    return existsSync(join(dir, 'Default', 'Sessions'));
 }
 /**
  * The Chrome already running on a profile folder with a DevTools port, e.g. the user window opened by

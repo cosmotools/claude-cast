@@ -67,7 +67,7 @@ export async function launchChrome(dir: string, opts: LaunchOptions = {}): Promi
   const portFile = join(dir, 'DevToolsActivePort');
   rmSync(portFile, { force: true });
   if (opts.look?.color) applyColor(dir, opts.look.color);
-  const restore = opts.restore && existsSync(join(dir, 'Default', 'Sessions'));
+  const restore = opts.restore && hasSession(dir);
   if (restore) clearCrashedExit(dir);
   if (restore && opts.look) nameSessionWindows(dir, opts.look.title);
 
@@ -175,6 +175,11 @@ function forceStop(pid: number | undefined): void {
   if (!pid) return;
   if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true });
   else try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+}
+
+/** Whether the profile has a saved session for --restore-last-session to bring back. */
+export function hasSession(dir: string): boolean {
+  return existsSync(join(dir, 'Default', 'Sessions'));
 }
 
 /**

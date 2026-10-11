@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -122,14 +122,51 @@ describe('user window', () => {
     const second = await startLoginWindow(dir, { name: 'Again', sites: [new URL(site.url).host] });
     assert.equal(endpointOf(dir), port);
     const pages = (await pageTargets(endpointOf(dir))).map(t => t.url);
-    assert.equal(pages.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 2, pages.join('\n'));
+    assert.equal(pages.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 1, pages.join('\n'));
     assert.ok(pages.includes(`${site.url}/`), pages.join('\n'));
     // A site already open is not opened again.
     await startLoginWindow(dir, { name: 'Again', sites: [new URL(site.url).host] });
     const again = (await pageTargets(endpointOf(dir))).map(t => t.url);
     assert.equal(again.filter(u => u.startsWith(site.url)).length, 1, again.join('\n'));
+    assert.equal(again.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 1, again.join('\n'));
     await second.chrome.close();
     await first.chrome.exited;
+  });
+
+  test('reopening a closed window restores its tabs and opens only what is missing', async () => {
+    addProfile(sb.paths, 'Restored', 'local', {});
+    const dir = findProfile(sb.paths, 'Restored')!.dir;
+    const host = new URL(site.url).host;
+    // Headless Chrome takes one URL on its command line: the person opens the site and a tab of their own.
+    const first = await startLoginWindow(dir, { name: 'Restored' });
+    const from = site.hits.length;
+    for (const url of [`${site.url}/`, `${site.url}/?tab=own`]) {
+      await fetch(`${first.chrome.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+    }
+    await until(() => site.hits.slice(from).some(h => h.includes('tab=own')));
+    // Chrome saves the session a few seconds after a change, and a tab opened just before closing does not come
+    // back. Once the page has loaded (it has its title), switching tabs makes Chrome save again, and the save
+    // includes the tab. Only file sizes: Windows Chrome keeps the session file locked.
+    const list = async () => await (await fetch(`${first.chrome.endpoint}/json/list`)).json() as { id: string; url: string; title: string }[];
+    let tabs = await list();
+    for (const end = Date.now() + 15_000; !tabs.some(t => t.url.endsWith('?tab=own') && !t.title.includes('tab=own')); tabs = await list()) {
+      assert.ok(Date.now() < end, 'the page did not load');
+      await new Promise(r => setTimeout(r, 100));
+    }
+    const sessions = join(dir, 'Default', 'Sessions');
+    const saved = () => readdirSync(sessions).reduce((n, f) => n + statSync(join(sessions, f)).size, 0);
+    const before = saved();
+    for (const t of tabs.filter(t => t.url.startsWith('http')).reverse()) await fetch(`${first.chrome.endpoint}/json/activate/${t.id}`);
+    await until(() => saved() > before);
+    await first.chrome.close();
+    for (let i = 0; i < 2; i++) {
+      const again = await startLoginWindow(dir, { name: 'Restored', sites: [host] });
+      const pages = (await pageTargets(endpointOf(dir))).map(t => t.url);
+      assert.equal(pages.filter(u => u === `${site.url}/`).length, 1, pages.join('\n'));
+      assert.equal(pages.filter(u => u.endsWith('?tab=own')).length, 1, pages.join('\n'));
+      assert.equal(pages.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 1, pages.join('\n'));
+      await again.chrome.close();
+    }
   });
 
   test('a window closed after its Claude session ended is saved at the next session start', async () => {
