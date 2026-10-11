@@ -74,8 +74,13 @@ export async function startLoginWindow(dir: string, opts: LoginWindowOptions): P
   const urls = [pathToFileURL(instructions).href, ...(opts.sites ?? []).map(siteUrl)];
 
   const running = await runningChrome(dir);
-  // Opening tabs over HTTP creates targets without attaching to any page.
-  if (running) for (const url of urls) await fetch(`${running.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+  if (running?.endpoint) {
+    // A site already open in a tab (Teams the person left open) is not opened a second time.
+    const open = await openHosts(running.endpoint);
+    const missing = urls.filter(url => { const host = httpHost(url); return !host || !open.has(host); });
+    // Opening tabs over HTTP creates targets without attaching to any page.
+    for (const url of missing) await fetch(`${running.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
+  }
   const chrome = running ?? await launchChrome(dir, {
     restore: true,
     look: opts.look,
@@ -104,6 +109,12 @@ export async function openLoginWindow(dir: string, opts: LoginWindowOptions): Pr
   clearTimeout(timer);
   if (timedOut) await chrome.close();
   return { ...await readLogin(dir, startedAt), timedOut };
+}
+
+/** Hosts shown in the browser's tabs, read over HTTP without attaching to any page. */
+async function openHosts(endpoint: string): Promise<Set<string>> {
+  const targets = await (await fetch(`${endpoint}/json/list`)).json() as { type: string; url: string }[];
+  return new Set(targets.filter(t => t.type === 'page').map(t => httpHost(t.url)).filter((h): h is string => !!h));
 }
 
 /** "https://app.example.com/vendor?code=…#x" → "https://app.example.com/vendor" */

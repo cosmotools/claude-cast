@@ -124,6 +124,10 @@ describe('user window', () => {
     const pages = (await pageTargets(endpointOf(dir))).map(t => t.url);
     assert.equal(pages.filter(u => u.endsWith(INSTRUCTIONS_FILE)).length, 2, pages.join('\n'));
     assert.ok(pages.includes(`${site.url}/`), pages.join('\n'));
+    // A site already open is not opened again.
+    await startLoginWindow(dir, { name: 'Again', sites: [new URL(site.url).host] });
+    const again = (await pageTargets(endpointOf(dir))).map(t => t.url);
+    assert.equal(again.filter(u => u.startsWith(site.url)).length, 1, again.join('\n'));
     await second.chrome.close();
     await first.chrome.exited;
   });
