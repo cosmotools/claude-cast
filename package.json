@@ -14,7 +14,7 @@
     "demo": "node docs/demo/render.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
+    "@modelcontextprotocol/sdk": "1.32.0",
     "@playwright/mcp": "0.0.83",
     "playwright-core": "1.64.0-alpha-1790635538000",
     "sql.js": "1.14.2",
