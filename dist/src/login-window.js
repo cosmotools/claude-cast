@@ -99,6 +99,12 @@ async function addTabs(endpoint, instructionsUrl, sites, restoring) {
     const earlier = tabs.filter(t => t.url.startsWith('file:') && t.url.endsWith(`/${INSTRUCTIONS_FILE}`));
     for (const tab of earlier)
         await fetch(`${endpoint}/json/close/${tab.id}`);
+    // Closing finishes after the reply; wait (up to 5 s) so the next call sees the window as it is.
+    const closing = new Set(earlier.map(t => t.id));
+    for (const end = Date.now() + 5000; closing.size && Date.now() < end; await new Promise(r => setTimeout(r, 100))) {
+        if (!(await pageTabs(endpoint)).some(t => closing.has(t.id)))
+            break;
+    }
 }
 /** "https://app.example.com/vendor?code=…#x" → "https://app.example.com/vendor" */
 export function pageUrl(url) {

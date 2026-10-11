@@ -144,9 +144,20 @@ describe('user window', () => {
       await fetch(`${first.chrome.endpoint}/json/new?${encodeURIComponent(url)}`, { method: 'PUT' });
     }
     await until(() => site.hits.slice(from).some(h => h.includes('tab=own')));
-    // Chrome saves the session every few seconds; a tab opened just before closing would not come back.
+    // Chrome saves the session a few seconds after a change, and a tab opened just before closing does not come
+    // back. Once the page has loaded (it has its title), switching tabs makes Chrome save again, and the save
+    // includes the tab. Only file sizes: Windows Chrome keeps the session file locked.
+    const list = async () => await (await fetch(`${first.chrome.endpoint}/json/list`)).json() as { id: string; url: string; title: string }[];
+    let tabs = await list();
+    for (const end = Date.now() + 15_000; !tabs.some(t => t.url.endsWith('?tab=own') && !t.title.includes('tab=own')); tabs = await list()) {
+      assert.ok(Date.now() < end, 'the page did not load');
+      await new Promise(r => setTimeout(r, 100));
+    }
     const sessions = join(dir, 'Default', 'Sessions');
-    await until(() => existsSync(sessions) && readdirSync(sessions).some(f => readFileSync(join(sessions, f)).includes('tab=own')));
+    const saved = () => readdirSync(sessions).reduce((n, f) => n + statSync(join(sessions, f)).size, 0);
+    const before = saved();
+    for (const t of tabs.filter(t => t.url.startsWith('http')).reverse()) await fetch(`${first.chrome.endpoint}/json/activate/${t.id}`);
+    await until(() => saved() > before);
     await first.chrome.close();
     for (let i = 0; i < 2; i++) {
       const again = await startLoginWindow(dir, { name: 'Restored', sites: [host] });
