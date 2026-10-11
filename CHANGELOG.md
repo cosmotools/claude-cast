@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- Claude no longer calls a site's API with the person's access token instead of using the page. The `browser_evaluate` and `browser_run_code_unsafe` descriptions and the `cast` skill tell Claude to read pages, not to fetch the API, read tokens from storage or put secrets into fields, and not to follow links inside a script. Network request details (`browser_network_request`, `browser_network_requests`) show tokens, cookies and passwords as `(hidden by cast)`.
 - When Claude Code blocks a browser action, Claude says in plain words what the action would do and offers that you do it in the window yourself or approve this one action, instead of naming an internal tool such as `mcp__plugin_cast_cast__browser_click`.
 - Tabs Claude opens no longer pile up across sessions. cast remembers which tabs Claude opened, also after the window is closed and opened again, marks them `(opened by Claude)` in tab lists so Claude can reuse them, and keeps at most 3 of them per profile: opening another closes the oldest. The person's own tabs are never closed.
 

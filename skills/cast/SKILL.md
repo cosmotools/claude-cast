@@ -46,8 +46,15 @@ Claude Code may deny a `browser_*` call (a permission prompt the user declined, 
 - the choices: they do it themselves in that person's window, or they approve this one action and you try again.
 Do not show internal tool names such as `mcp__plugin_cast_cast__browser_click` or `browser_click`; if they want to allow such actions for good, point them to `/permissions`. Do not retry the same action another way.
 
+## Working in the page
+- Work through the page as the person would: snapshot, click, type, read. `browser_evaluate` and `browser_run_code_unsafe` are for reading what the page shows, not for getting around it.
+- Do not call the site's API yourself (`fetch` in a page script, or repeating a request seen in `browser_network_requests`), and never read access tokens, cookies or other credentials from `localStorage`, `sessionStorage`, `document.cookie` or request headers. If the task really needs an API call, ask the user first.
+- Never put secrets into fields (from files, local servers or environment variables): passwords and MFA codes are typed by the person.
+- Do not follow links, submit forms or wait for a navigation inside a page script: the page is replaced and the script fails ("Execution context was destroyed"). Use `browser_click`, then read the page.
+- If Claude Code denies a page script, do not retry it in another form: do the step through the page, or ask the user.
+
 ## Privacy
-Profiles hold real sessions (mail included). Look only at what the task needs. Never print cookies, tokens or storage contents.
+Profiles hold real sessions (mail included). Look only at what the task needs. Never print cookies, tokens or storage contents. cast hides tokens, cookies and passwords in network request details.
 
 ## Finishing
 When the task is done, close the profiles you opened with `cast_close {profile}`. Logins are kept.

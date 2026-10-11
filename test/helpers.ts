@@ -61,6 +61,23 @@ export async function startSite(): Promise<TestSite> {
       res.end();
       return;
     }
+    if (url.pathname === '/token-app') {
+      // Like an OAuth app: an access token in localStorage, sent to the app's API, which answers with a new one.
+      const token = `tok${randomBytes(12).toString('hex')}`;
+      secrets.push(token);
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<title>Token app</title><script>localStorage.setItem('access_token', '${token}');
+fetch('/api/me', { method: 'POST', headers: { Authorization: 'Bearer ${token}', 'X-Api-Key': '${token}', 'Content-Type': 'application/json' },
+  body: JSON.stringify({ password: '${token}', note: 'kept' }) })</script>`);
+      return;
+    }
+    if (url.pathname === '/api/me') {
+      const token = `tok${randomBytes(12).toString('hex')}`;
+      secrets.push(token);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Set-Cookie': `session=${token}; Path=/` });
+      res.end(JSON.stringify({ user: 'sam', access_token: token, refresh_token: token }));
+      return;
+    }
     if (url.pathname === '/alert') {
       // A page that opens a dialog as it loads, so evaluating in it waits for the dialog.
       res.writeHead(200, { 'Content-Type': 'text/html' });

@@ -147,6 +147,7 @@ describe('gateway', () => {
     assert.ok(names.includes('browser_handle_dialog'));
     assert.ok(!names.includes('browser_close'));
     assert.match(tools.find(t => t.name === 'browser_navigate')?.description ?? '', /replaces it\. .*browser_tabs "new"/);
+    assert.match(tools.find(t => t.name === 'browser_evaluate')?.description ?? '', /do not call the site's API, read tokens/);
     for (const t of tools) {
       assert.equal(t.inputSchema.required?.[0], 'profile');
       assert.ok(t.inputSchema.properties?.profile);
@@ -299,6 +300,32 @@ describe('gateway', () => {
       assert.ok(person[0].endsWith('/?tab=person)'), tabs.join('\n'));
       await gateway.close('Tia');
     }
+  });
+
+  test('network request details hide tokens, cookies and passwords', async () => {
+    addProfile(sb.paths, 'Nia', 'local', {});
+    const from = site.secrets.length;
+    await gateway.call(gp('Nia'), 'browser_tabs', { action: 'new', url: `${site.url}/token-app` });
+    let list = '';
+    for (let i = 0; i < 50 && !/\/api\/me => \[200\]/.test(list); i++) {
+      if (i) await new Promise(r => setTimeout(r, 100));
+      list = text(await gateway.call(gp('Nia'), 'browser_network_requests', { static: false }));
+    }
+    const index = Number(/^(\d+)\. \[POST\] \S+\/api\/me/m.exec(list)?.[1]);
+    assert.ok(index, list);
+    const parts = [undefined, 'request-headers', 'response-headers', 'request-body', 'response-body'];
+    const answers = await Promise.all(parts.map(part => gateway.call(gp('Nia'), 'browser_network_request', { index, ...(part ? { part } : {}) })));
+    const saved = await gateway.call(gp('Nia'), 'browser_network_request', { index, part: 'response-body', filename: 'me.json' });
+    const file = /\]\(([^)]+)\)/.exec(text(saved))?.[1];
+    assert.ok(file && existsSync(file), text(saved));
+    const all = [...answers.map(text), readFileSync(file, 'utf8')].join('\n');
+    assert.equal(site.secrets.length, from + 2);
+    assertNoSecrets(all);
+    // What is not a credential stays: the header names, the scheme and other fields.
+    assert.match(all, /authorization: Bearer \(hidden by cast\)/i);
+    assert.match(all, /"note":"kept"/);
+    assert.match(all, /"user":"sam"/);
+    await gateway.close('Nia');
   });
 
   test('browser_close is not proxied', async () => {

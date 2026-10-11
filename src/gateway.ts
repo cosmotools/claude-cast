@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -6,6 +6,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { Browser } from './browsers.js';
 import { type Chrome, type WindowLook, launchChrome } from './chrome.js';
+import { hideCredentials } from './credentials.js';
 import { DialogGuard } from './dialogs.js';
 import { INSTRUCTIONS_FILE } from './login-window.js';
 import { ensurePrivateDir } from './paths.js';
@@ -175,7 +176,8 @@ export class Gateway {
       const before = newTab ? await makeRoomForTab(child).catch(() => undefined) : undefined;
       const result = await child.client.callTool({ name: tool, arguments: args }) as CallToolResult;
       const tabs = await saveClaudeTabs(child, before).catch(() => undefined);
-      return absoluteLinks(tabs ? markClaudeTabs(result, child, tabs) : result, profile.outputDir);
+      const answer = absoluteLinks(tabs ? markClaudeTabs(result, child, tabs) : result, profile.outputDir);
+      return NETWORK_TOOLS.has(tool) ? withoutCredentials(answer) : answer;
     } catch (e) {
       if (child.exited) {
         throw new GatewayError(`Browser for "${profile.name}" stopped (${child.exited}). Call the tool again to reopen it.`);
@@ -345,18 +347,48 @@ const NAVIGATE_NOTE = ' In cast the current tab is usually one of the person\'s 
   + 'To open a site, select a tab that already shows it or a tab marked "(opened by Claude)" (browser_tabs "select"), or open a new one (browser_tabs "new" with url); '
   + 'navigate only in a tab marked "(opened by Claude)" or one you opened or selected for this task.';
 
+/** Page scripts run in the person's session: they read the page, they do not get around it. */
+const PAGE_SCRIPT_NOTE = ' In cast this runs in the person\'s own logged-in session. Use it to read what the page shows, not to get around the page: '
+  + 'do not call the site\'s API, read tokens, cookies or storage, or put secrets into fields; click and type instead, and ask the user before calling an API directly. '
+  + 'Do not follow links or submit forms inside it (the page is replaced and the script fails): browser_click first, then read.';
+const NETWORK_NOTE = ' cast hides tokens, cookies and passwords in the output; do not use requests to call the site\'s API yourself.';
+const NOTES: Record<string, string> = {
+  browser_navigate: NAVIGATE_NOTE,
+  browser_evaluate: PAGE_SCRIPT_NOTE,
+  browser_run_code_unsafe: PAGE_SCRIPT_NOTE,
+  browser_network_request: NETWORK_NOTE,
+  browser_network_requests: NETWORK_NOTE,
+};
+
 function withProfileParam(tool: Tool): Tool {
   const schema = tool.inputSchema;
   const required = (schema.required ?? []).filter(r => r !== 'profile');
   return {
     ...tool,
-    ...(tool.name === 'browser_navigate' ? { description: (tool.description ?? '') + NAVIGATE_NOTE } : {}),
+    ...(NOTES[tool.name] ? { description: (tool.description ?? '') + NOTES[tool.name] } : {}),
     inputSchema: {
       ...schema,
       properties: { profile: PROFILE_PARAM, ...(schema.properties ?? {}) },
       required: ['profile', ...required],
     },
   };
+}
+
+/** Tools that print request headers and bodies, where tokens, cookies and passwords show up. */
+const NETWORK_TOOLS = new Set(['browser_network_request', 'browser_network_requests']);
+
+/** Hides credentials in a network tool's answer and in the text files it saved (`filename`). */
+function withoutCredentials(result: CallToolResult): CallToolResult {
+  if (!Array.isArray(result.content)) return result;
+  for (const c of result.content) {
+    if (c.type !== 'text') continue;
+    for (const [, file] of c.text.matchAll(/\]\(([^)\s]+)\)/g)) {
+      if (!isAbsolute(file) || !existsSync(file)) continue;
+      const data = readFileSync(file);
+      if (!data.includes(0)) writeFileSync(file, hideCredentials(data.toString('utf8')));
+    }
+  }
+  return { ...result, content: result.content.map(c => (c.type === 'text' ? { ...c, text: hideCredentials(c.text) } : c)) };
 }
 
 /**
