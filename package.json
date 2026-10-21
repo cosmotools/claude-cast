@@ -17,7 +17,7 @@
     "@modelcontextprotocol/sdk": "1.32.0",
     "@playwright/mcp": "0.0.83",
     "playwright-core": "1.64.0-alpha-1790635538000",
-    "sql.js": "1.14.2",
+    "sql.js": "1.15.0",
     "yaml": "2.9.1",
     "zod": "4.6.5"
   },
